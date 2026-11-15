@@ -1,0 +1,20 @@
+# RadLimbo Configuration (Minecraft 26.3 / protocol 777)
+config_version = 1
+
+bind_addr = "127.0.0.1:25566"
+forwarding_mode = "none" # Set to "modern" when running behind RadProxy
+forwarding_secret = "change-me-radbyte-secret"
+
+motd = "RadLimbo 26.3 - Waiting Room"
+max_players = 1000
+view_distance = 2
+game_mode = 3
+
+spawn_x = 0.5
+spawn_y = 64.0
+spawn_z = 0.5
+
+brand = "RadLimbo"
+welcome_message = "Welcome to RadLimbo! Waiting for a backend server..."
+reconnect_server = "lobby"
+keep_alive_interval_secs = 15

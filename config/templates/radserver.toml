@@ -1,0 +1,37 @@
+# RadServer Configuration (Minecraft 26.3 / protocol 777)
+config_version = 1
+
+bind_addr = "127.0.0.1:25567"
+forwarding_mode = "none" # Set to "modern" when running behind RadProxy
+forwarding_secret = "change-me-radbyte-secret"
+
+motd = "RadServer 26.3 - Hub"
+max_players = 200
+view_distance = 4
+tps = 20
+game_mode = 2
+
+spawn_x = 0.5
+spawn_y = 64.0
+spawn_z = 0.5
+
+brand = "RadServer"
+welcome_message = "Welcome to RadServer 26.3!"
+lobby_server = "limbo"
+
+# World & gameplay (Minecraft 26.3 / server.properties equivalents)
+level_name = "world"          # World folder name (vanilla: level-name)
+world_type = "flat"           # "flat" or "seeded"
+world_seed = 0                # Seed for world_type = "seeded" (vanilla: level-seed)
+difficulty = "easy"           # "peaceful" (0), "easy" (1), "normal" (2), "hard" (3)
+pvp = true                    # Enable player-versus-player combat
+force_gamemode = false        # Force default game_mode on every join
+spawn_protection = 16         # Block radius around spawn protected from non-ops (0 disables)
+autosave_interval_secs = 300  # Periodic autosave interval in seconds (0 disables)
+
+# Whitelist, operators & status
+white_list = false            # Set true to restrict access to whitelisted players (vanilla 26.3 defaults to true)
+enforce_whitelist = false     # Kick online non-whitelisted non-ops on /whitelist on or reload
+op_permission_level = 4       # Default op level assigned by /op (1..=4)
+enable_status = true          # Respond to Server List Ping status requests
+hide_online_players = false   # Report 0 online players in Server List Ping

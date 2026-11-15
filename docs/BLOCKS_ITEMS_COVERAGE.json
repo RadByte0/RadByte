@@ -1,0 +1,354 @@
+{
+  "protocol": 777,
+  "version": "26.3",
+  "provenance": {
+    "version": "26.3",
+    "protocol": 777,
+    "mapping_source": "vineflower-direct",
+    "sources": [
+      "reports/blocks.json",
+      "reports/registries.json#minecraft:block"
+    ],
+    "kind": "extracted"
+  },
+  "totals": {
+    "blocks": 1286,
+    "block_states": 35723,
+    "items": 1658,
+    "client_verified_in_gui": false
+  },
+  "block_families": {
+    "air_and_fluids": {
+      "count": 5,
+      "total_states": 35,
+      "has_matching_item": 1,
+      "status": {
+        "registry": true,
+        "placement": "partial (buckets/water sim)",
+        "breaking": "n/a",
+        "loot": "none",
+        "interaction": "water flow & item buoyancy",
+        "physics": true,
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:air",
+        "minecraft:water",
+        "minecraft:lava",
+        "minecraft:void_air",
+        "minecraft:cave_air"
+      ]
+    },
+    "full_blocks_and_stone": {
+      "count": 337,
+      "total_states": 337,
+      "has_matching_item": 318,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "basic (stone->cobble, grass->dirt, coal/diamond)",
+        "interaction": "solid collision",
+        "physics": true,
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:stone",
+        "minecraft:granite",
+        "minecraft:polished_granite",
+        "minecraft:diorite",
+        "minecraft:polished_diorite"
+      ]
+    },
+    "plants_crops_saplings": {
+      "count": 106,
+      "total_states": 1059,
+      "has_matching_item": 70,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "wheat crop growth sim",
+        "physics": "non-solid",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:grass_block",
+        "minecraft:oak_sapling",
+        "minecraft:spruce_sapling",
+        "minecraft:birch_sapling",
+        "minecraft:jungle_sapling"
+      ]
+    },
+    "other_stateful_blocks": {
+      "count": 343,
+      "total_states": 7383,
+      "has_matching_item": 291,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self if item exists",
+        "interaction": "none yet",
+        "physics": "solid",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:podzol",
+        "minecraft:pale_oak_wood",
+        "minecraft:mangrove_propagule",
+        "minecraft:suspicious_sand",
+        "minecraft:suspicious_gravel"
+      ]
+    },
+    "containers_and_workstations": {
+      "count": 41,
+      "total_states": 442,
+      "has_matching_item": 41,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "chest, crafting_table, furnace UI implemented",
+        "physics": true,
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:dispenser",
+        "minecraft:chest",
+        "minecraft:crafting_table",
+        "minecraft:furnace",
+        "minecraft:enchanting_table"
+      ]
+    },
+    "beds_banners_signs": {
+      "count": 101,
+      "total_states": 2048,
+      "has_matching_item": 59,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "none yet",
+        "physics": "partial",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:white_bed",
+        "minecraft:orange_bed",
+        "minecraft:magenta_bed",
+        "minecraft:light_blue_bed",
+        "minecraft:yellow_bed"
+      ]
+    },
+    "redstone_and_rails": {
+      "count": 52,
+      "total_states": 2005,
+      "has_matching_item": 48,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "lever, redstone wire/lamp, tnt implemented",
+        "physics": "partial",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:powered_rail",
+        "minecraft:detector_rail",
+        "minecraft:sticky_piston",
+        "minecraft:piston",
+        "minecraft:piston_head"
+      ]
+    },
+    "stairs": {
+      "count": 97,
+      "total_states": 7760,
+      "has_matching_item": 97,
+      "status": {
+        "registry": true,
+        "placement": "default_state (needs facing/half/shape)",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "stair collision",
+        "physics": true,
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:white_wool_stairs",
+        "minecraft:orange_wool_stairs",
+        "minecraft:magenta_wool_stairs",
+        "minecraft:light_blue_wool_stairs",
+        "minecraft:yellow_wool_stairs"
+      ]
+    },
+    "slabs": {
+      "count": 101,
+      "total_states": 606,
+      "has_matching_item": 101,
+      "status": {
+        "registry": true,
+        "placement": "default_state (needs top/bottom/double)",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "half-slab collision",
+        "physics": true,
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:white_wool_slab",
+        "minecraft:orange_wool_slab",
+        "minecraft:magenta_wool_slab",
+        "minecraft:light_blue_wool_slab",
+        "minecraft:yellow_wool_slab"
+      ]
+    },
+    "doors": {
+      "count": 22,
+      "total_states": 1408,
+      "has_matching_item": 22,
+      "status": {
+        "registry": true,
+        "placement": "default_state (needs 2-high/hinge)",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "none yet",
+        "physics": "partial",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:oak_door",
+        "minecraft:iron_door",
+        "minecraft:spruce_door",
+        "minecraft:birch_door",
+        "minecraft:jungle_door"
+      ]
+    },
+    "fences_walls_gates": {
+      "count": 59,
+      "total_states": 11232,
+      "has_matching_item": 59,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "none yet",
+        "physics": "solid",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:oak_fence",
+        "minecraft:oak_fence_gate",
+        "minecraft:resin_brick_wall",
+        "minecraft:nether_brick_fence",
+        "minecraft:cobblestone_wall"
+      ]
+    },
+    "trapdoors": {
+      "count": 22,
+      "total_states": 1408,
+      "has_matching_item": 22,
+      "status": {
+        "registry": true,
+        "placement": "default_state",
+        "breaking": "survival/creative",
+        "loot": "self",
+        "interaction": "none yet",
+        "physics": "partial",
+        "persistence": true,
+        "client_verified": false
+      },
+      "sample_blocks": [
+        "minecraft:oak_trapdoor",
+        "minecraft:spruce_trapdoor",
+        "minecraft:birch_trapdoor",
+        "minecraft:jungle_trapdoor",
+        "minecraft:acacia_trapdoor"
+      ]
+    }
+  },
+  "item_families": {
+    "air": {
+      "count": 1,
+      "sample_items": [
+        "minecraft:air"
+      ]
+    },
+    "block_items": {
+      "count": 1128,
+      "sample_items": [
+        "minecraft:stone",
+        "minecraft:granite",
+        "minecraft:polished_granite",
+        "minecraft:diorite",
+        "minecraft:polished_diorite"
+      ]
+    },
+    "materials_and_misc": {
+      "count": 329,
+      "sample_items": [
+        "minecraft:redstone",
+        "minecraft:saddle",
+        "minecraft:white_harness",
+        "minecraft:orange_harness",
+        "minecraft:magenta_harness"
+      ]
+    },
+    "armor": {
+      "count": 35,
+      "sample_items": [
+        "minecraft:turtle_helmet",
+        "minecraft:leather_helmet",
+        "minecraft:leather_chestplate",
+        "minecraft:leather_leggings",
+        "minecraft:leather_boots"
+      ]
+    },
+    "usable_items_and_projectiles": {
+      "count": 114,
+      "sample_items": [
+        "minecraft:flint_and_steel",
+        "minecraft:bowl",
+        "minecraft:bow",
+        "minecraft:arrow",
+        "minecraft:bucket"
+      ]
+    },
+    "food": {
+      "count": 16,
+      "sample_items": [
+        "minecraft:apple",
+        "minecraft:bread",
+        "minecraft:porkchop",
+        "minecraft:cooked_porkchop",
+        "minecraft:golden_apple"
+      ]
+    },
+    "tools_and_weapons": {
+      "count": 35,
+      "sample_items": [
+        "minecraft:wooden_sword",
+        "minecraft:wooden_shovel",
+        "minecraft:wooden_pickaxe",
+        "minecraft:wooden_axe",
+        "minecraft:wooden_hoe"
+      ]
+    }
+  }
+}

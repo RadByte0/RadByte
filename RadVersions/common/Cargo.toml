@@ -1,0 +1,16 @@
+[package]
+name = "rad-version"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minecraft version descriptors, capabilities, and world mechanics profile rules for RadByte"
+
+[features]
+default = []
+
+[dependencies]
+flate2 = { workspace = true }
+rad-core = { path = "../../RadCore", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

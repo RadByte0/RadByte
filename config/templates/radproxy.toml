@@ -1,0 +1,21 @@
+# RadProxy Configuration (Minecraft 26.3 / protocol 777)
+config_version = 1
+
+bind_addr = "0.0.0.0:25565"
+default_server = "limbo"
+try_servers = ["limbo"]
+
+forwarding_mode = "modern"
+forwarding_secret = "change-me-radbyte-secret"
+
+online_mode = false
+motd = "RadProxy 26.3"
+max_players = 1000
+proxy_brand = "RadProxy"
+bungeecord_messaging = true
+
+radons_dir = "radons"
+radonfigs_dir = "radonfigs"
+
+[servers]
+limbo = "127.0.0.1:25566"

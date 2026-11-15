@@ -1,0 +1,13 @@
+[package]
+name = "radon-guest-proxy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rad-api = { path = "../../RadAPI", default-features = false, features = ["v1"] }

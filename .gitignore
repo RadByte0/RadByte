@@ -1,0 +1,36 @@
+# Rust build & packaging outputs
+/target/
+/dist/
+/Paper-26.3/
+/artifacts/
+/versions/
+**/target/
+
+# Data with unverified redistribution rights; review before publication
+/RadCore/data/mc777/
+/RadCore/src/mc777_data.rs
+/RadCore/src/packet/configuration_static_tags.rs
+/RadCore/src/packet/configuration_core_tags.rs
+*.jar
+*.pid
+
+# Runtime world & plugin artifacts
+/world/
+/dist/**/world/
+/backups/
+.radbyte-pids.json
+*.mca
+/radons/*.wasm
+*.wasm
+*.exe
+*.dll
+
+# OS / IDE clutter
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Quarantined project files; never include automatically
+/NU/
+

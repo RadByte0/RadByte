@@ -1,0 +1,32 @@
+﻿{
+    "generator_version":  1,
+    "game_version":  "26.3",
+    "protocol":  777,
+    "source":  "Local snapshots: inspect each JSON _provenance; upstream rights and revisions not yet verified",
+    "verified_content_match": {
+        "verified_on": "2026-11-15",
+        "repository": "https://github.com/MCCTeam/UMPK",
+        "commit": "a1e743b48d526f5a7645b47ec48c10b65237edf9",
+        "upstream_directory": "data/java/777",
+        "files": ["blocks.json", "items.json", "entities.json", "menus.json"],
+        "evidence": "All four upstream files are byte-identical to the local files; SHA-256 values match the sha256 object below.",
+        "upstream_license": "MIT",
+        "upstream_license_url": "https://github.com/MCCTeam/UMPK/blob/a1e743b48d526f5a7645b47ec48c10b65237edf9/LICENSE",
+        "original_data_provenance": "Upstream JSON declares extracted Minecraft reports and mapping_source vineflower-direct.",
+        "limitations": "Content identity does not establish who copied the files or the direction of copying. Upstream MIT licensing alone does not establish rights to underlying third-party Minecraft content.",
+        "redistribution_rights": "NOT_DETERMINED"
+    },
+    "generated_utc":  "2026-11-14T14:24:29.9810326Z",
+    "counts":  {
+                   "items":  1658,
+                   "blocks":  1286,
+                   "entities":  161,
+                   "menus":  25
+               },
+    "sha256":  {
+                   "entities.json":  "f8d7d9ed05aeca249fbd63133fa39c6aed8f798b56e4628df11b572377d81f67",
+                   "menus.json":  "24143070852eea187ae0ea90c98de66f509e76d9a46411baac681f1bc9002864",
+                   "items.json":  "cb463d8e0c1311a32e7f08cd32af4b05148a62261a5187c6ab0fad516d9fda23",
+                   "blocks.json":  "b9b75e68479a3ea6e85f4d4899ed8e4e0a7bcd0afedfabc15c92e9d029455b8f"
+               }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "rad-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core zero-copy Minecraft protocol, framing, and shared primitives for the RadByte ecosystem."
+
+[features]
+default = []
+
+[dependencies]
+aes.workspace = true
+bytes.workspace = true
+cfb8.workspace = true
+flate2.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "protocol_bench"
+harness = false

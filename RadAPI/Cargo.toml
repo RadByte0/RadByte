@@ -1,0 +1,16 @@
+[package]
+name = "rad-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned plugin & WASM guest SDK for RadProxy radons (v1 and future APIs)."
+
+[features]
+default = ["v1", "proxy"]
+v1 = []
+v2 = []
+proxy = ["dep:rad-core"]
+
+[dependencies]
+rad-core = { path = "../RadCore", default-features = false, optional = true }
