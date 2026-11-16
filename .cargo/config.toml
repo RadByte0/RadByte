@@ -1,2 +1,4 @@
+# Portable default build configuration across x86_64, aarch64, and wasm32 targets.
+# To tune for a specific local CPU, pass `RUSTFLAGS="-C target-cpu=native"` when building locally.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+
