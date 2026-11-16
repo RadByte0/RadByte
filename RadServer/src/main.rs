@@ -4,8 +4,8 @@
 
 #[cfg(windows)]
 mod gui_windows;
-mod version_selection;
 mod version_download;
+mod version_selection;
 
 use std::path::{Path, PathBuf};
 
