@@ -1,4 +1,5 @@
 //! Windows-native optional server control window. The server remains the same EXE.
+mod version_picker;
 use std::{
     collections::VecDeque,
     io::{BufRead, BufReader, Write},
@@ -169,6 +170,16 @@ unsafe extern "system" {
     fn MoveToEx(dc: H, x: i32, y: i32, old: *mut Point) -> i32;
     fn LineTo(dc: H, x: i32, y: i32) -> i32;
     fn CreateSolidBrush(color: u32) -> H;
+    fn RoundRect(
+        dc: H,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        width: i32,
+        height: i32,
+    ) -> i32;
+    fn GetStockObject(index: i32) -> H;
     fn SetTextColor(dc: H, color: u32) -> u32;
     fn SetBkColor(dc: H, color: u32) -> u32;
     fn SetBkMode(dc: H, mode: i32) -> i32;
@@ -322,7 +333,6 @@ struct Layout {
     side_x: i32,
     side_width: i32,
     input_y: i32,
-    window_width: i32,
 }
 
 fn layout(width: i32, height: i32) -> Layout {
@@ -334,7 +344,6 @@ fn layout(width: i32, height: i32) -> Layout {
         side_x,
         side_width,
         input_y: (height - 56).max(350),
-        window_width: width,
     }
 }
 
@@ -523,6 +532,24 @@ fn draw_text(dc: H, text: &str, x: i32, y: i32, width: i32, color: u32) {
     }
 }
 
+fn rounded_rect(dc: H, bounds: &Rect, brush: H, radius: i32) {
+    unsafe {
+        let old_brush = SelectObject(dc, brush);
+        let old_pen = SelectObject(dc, GetStockObject(8));
+        RoundRect(
+            dc,
+            bounds.left,
+            bounds.top,
+            bounds.right,
+            bounds.bottom,
+            radius,
+            radius,
+        );
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+    }
+}
+
 fn chart(
     dc: H,
     bounds: Rect,
@@ -535,7 +562,7 @@ fn chart(
     let (_, card, _) = *THEME.get().unwrap();
     let (body, _, value_font) = *UI_FONTS.get().unwrap();
     unsafe {
-        FillRect(dc, &bounds, card);
+        rounded_rect(dc, &bounds, card, 12);
         let old_font = SelectObject(dc, body);
         let width = bounds.right - bounds.left;
         let current = values.back().copied().unwrap_or_default();
@@ -560,7 +587,7 @@ fn chart(
         SelectObject(dc, body);
         draw_text(
             dc,
-            &format!("MAX {peak:.1} {unit}"),
+            &format!("Peak {peak:.1} {unit}"),
             bounds.left + width / 2,
             bounds.top + 35,
             width / 2 - 12,
@@ -692,8 +719,8 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
             }
             a.input = ctrl(h, "EDIT", "", 0x00800000 | 0x0080, 102, inst);
             a.button = ctrl(h, "BUTTON", "Send", 0x0000000b, 103, inst);
-            a.clear_button = ctrl(h, "BUTTON", "Clear view", 0x0000000b, 104, inst);
-            a.detail_button = ctrl(h, "BUTTON", "Full log", 0x0000000b, 105, inst);
+            a.clear_button = ctrl(h, "BUTTON", "Clear", 0x0000000b, 104, inst);
+            a.detail_button = ctrl(h, "BUTTON", "Details", 0x0000000b, 105, inst);
             a.save_button = ctrl(h, "BUTTON", "Save", 0x0000000b, 106, inst);
             a.stop_button = ctrl(h, "BUTTON", "Stop", 0x0000000b, 107, inst);
             let mono = THEME.get().unwrap().2;
@@ -740,9 +767,9 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                 SetBkColor(
                     w as H,
                     if msg == 0x0133 {
-                        0x001b1917
+                        0x00242120
                     } else {
-                        0x00100f0d
+                        0x001b1818
                     },
                 );
             }
@@ -754,7 +781,8 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
             let (_, brush, _) = *THEME.get().unwrap();
             let font = UI_FONTS.get().unwrap().0;
             unsafe {
-                FillRect(item.dc, &item.rect, brush);
+                FillRect(item.dc, &item.rect, THEME.get().unwrap().0);
+                rounded_rect(item.dc, &item.rect, brush, 10);
                 let old = SelectObject(item.dc, font);
                 SetTextColor(item.dc, if w == 107 { 0x008080f5 } else { 0x00e5e7eb });
                 SetBkMode(item.dc, 1);
@@ -762,11 +790,11 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                     item.dc,
                     wide(match w {
                         103 => "Send",
-                        104 => "Clear view",
+                        104 => "Clear",
                         106 => "Save",
                         107 => "Stop",
                         _ if FULL_LOG.load(Ordering::Relaxed) => "Compact",
-                        _ => "Full log",
+                        _ => "Details",
                     })
                     .as_ptr(),
                     -1,
@@ -795,11 +823,11 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                     a.input,
                     24,
                     pos.input_y,
-                    (pos.window_width - 148).max(30),
+                    (pos.main_width - 100).max(30),
                     32,
                     1,
                 );
-                MoveWindow(a.button, pos.window_width - 112, pos.input_y, 88, 32, 1);
+                MoveWindow(a.button, 24 + pos.main_width - 88, pos.input_y, 88, 32, 1);
                 MoveWindow(a.save_button, 24 + pos.main_width - 324, 96, 66, 27, 1);
                 MoveWindow(a.stop_button, 24 + pos.main_width - 252, 96, 66, 27, 1);
                 MoveWindow(a.detail_button, 24 + pos.main_width - 180, 96, 84, 27, 1);
@@ -943,9 +971,8 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                     "STOPPING  |  saving world...".to_owned()
                 } else {
                     format!(
-                        "ONLINE {}    PID {}    UPTIME {:02}:{:02}:{:02}",
+                        "{} online    ·    {:02}:{:02}:{:02}",
                         a.online_players,
-                        a.child.id(),
                         elapsed / 3600,
                         (elapsed / 60) % 60,
                         elapsed % 60
@@ -1009,25 +1036,15 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                 right: 30 + pos.main_width,
                 bottom: pos.input_y - 8,
             };
-            unsafe {
-                FillRect(dc, &console_frame, surface);
-            }
+            rounded_rect(dc, &console_frame, surface, 12);
             let (body, title, _) = *UI_FONTS.get().unwrap();
             unsafe {
                 let old = SelectObject(dc, title);
                 draw_text(dc, "RadServer", 24, 15, 270, 0x00efedeb);
                 SelectObject(dc, body);
 
-                draw_text(dc, "CONSOLE", 24, 101, 92, 0x00c4beba);
-                draw_text(
-                    dc,
-                    "Scroll up to pause",
-                    112,
-                    101,
-                    (pos.main_width - 440).max(0),
-                    0x008b8582,
-                );
-                draw_text(dc, "RESOURCES", pos.side_x, 101, pos.side_width, 0x00c4beba);
+                draw_text(dc, "Console", 24, 101, 92, 0x00c4beba);
+                draw_text(dc, "Resources", pos.side_x, 101, pos.side_width, 0x00c4beba);
                 SelectObject(dc, old);
             }
             let resources = resource_layout(pos.input_y);
@@ -1043,7 +1060,7 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                     right: pos.side_x + pos.side_width,
                     bottom: cpu_bottom,
                 },
-                "CPU  /  ALL CORES",
+                "CPU",
                 "%",
                 &a.cpu,
                 cpu_chart_scale(&a.cpu),
@@ -1057,7 +1074,7 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                     right: pos.side_x + pos.side_width,
                     bottom: ram_top + resources.chart_height,
                 },
-                "MEMORY  /  WORKING SET",
+                "Memory",
                 "MiB",
                 &a.ram,
                 ram_scale,
@@ -1074,22 +1091,22 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
                 let (body, _, _) = *UI_FONTS.get().unwrap();
                 let elapsed = a.started.elapsed().as_secs();
                 let players_ver = format!(
-                    "PLAYERS  {}   |   {}",
+                    "{} players  ·  {}",
                     a.online_players,
                     a.game_version.as_deref().unwrap_or("MC 26.3")
                 );
                 let uptime = format!(
-                    "UPTIME   {:02}:{:02}:{:02}",
+                    "Uptime  {:02}:{:02}:{:02}",
                     elapsed / 3600,
                     (elapsed / 60) % 60,
                     elapsed % 60
                 );
                 let address = format!(
-                    "BIND     {}",
+                    "Address  {}",
                     a.configured_address.as_deref().unwrap_or("not reported")
                 );
                 unsafe {
-                    FillRect(dc, &card, brush);
+                    rounded_rect(dc, &card, brush, 12);
                     let old = SelectObject(dc, body);
                     draw_text(
                         dc,
@@ -1156,6 +1173,24 @@ unsafe extern "system" fn window(h: H, msg: u32, w: usize, l: isize) -> isize {
 
 pub fn run() -> Result<i32, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if std::env::args_os().len() == 1
+        && let Some(dir) = exe.parent()
+    {
+        std::env::set_current_dir(dir).map_err(|e| e.to_string())?;
+    }
+    let cfg_path = rad_core::cli::resolve_config_path("rad.properties");
+    let versions = crate::resolve_versions_dir(&cfg_path);
+    let installed = crate::version_selection::load(&versions)
+        .ok()
+        .is_some_and(|version| {
+            rad_core::version_package::LoadedVersionPackage::load_from_versions_dir(
+                &versions, &version,
+            )
+            .is_ok()
+        });
+    if !installed && !version_picker::choose(&versions)? {
+        return Ok(0);
+    }
     let mut command = Command::new(&exe);
     command
         .arg("--nogui")
@@ -1208,8 +1243,8 @@ pub fn run() -> Result<i32, String> {
     }))
     .map_err(|_| "GUI already initialized")?;
     unsafe {
-        let background = CreateSolidBrush(0x00100f0d);
-        let controls = CreateSolidBrush(0x001b1917);
+        let background = CreateSolidBrush(0x001b1818);
+        let controls = CreateSolidBrush(0x00242120);
         let font = CreateFontW(
             -16,
             0,
@@ -1224,7 +1259,7 @@ pub fn run() -> Result<i32, String> {
             0,
             5,
             0x31,
-            wide("Consolas").as_ptr(),
+            wide("Cascadia Mono").as_ptr(),
         );
         if background == 0 || controls == 0 || font == 0 {
             return Err("Unable to initialize window theme".into());
@@ -1335,6 +1370,8 @@ pub fn run() -> Result<i32, String> {
             (&dark_title as *const i32).cast(),
             std::mem::size_of::<i32>() as u32,
         );
+        let rounded: i32 = 2;
+        let _ = DwmSetWindowAttribute(h, 33, (&rounded as *const i32).cast(), 4);
         ShowWindow(h, 1);
         UpdateWindow(h);
         let mut m: Msg = std::mem::zeroed();

@@ -15,12 +15,12 @@ Configuration templates are stored in `config/templates/`. For local startup, us
 
 ## GitHub Release downloads
 
-Each release provides separate `rad-server`, `rad-proxy`, `rad-limbo` and version library files. Choose files with the same target suffix: `x86_64` or `aarch64`, and Windows, Linux or macOS. The library is platform-specific (`.dll`, `.so`, or `.dylib`); it cannot be shared across operating systems. A `SHA256SUMS-<target>.txt` file lists the hashes for each target. On Linux and macOS, make downloaded executables runnable with `chmod +x <filename>`.
+Each release provides separate `rad-server`, `rad-proxy`, `rad-limbo` and version library files. Choose files with the same target suffix: `x86_64` or `aarch64`, and Windows, Linux or macOS. The library is platform-specific (`.dll`, `.so`, or `.dylib`); it cannot be shared across operating systems. GitHub displays SHA-256 hashes on release assets. On Linux and macOS, make downloaded executables runnable with `chmod +x <filename>`.
 
-RadServer also needs compatible version data which is not included in the release. Obtain `blocks.json`, `items.json`, `entities.json`, and `menus.json` separately, with rights appropriate to your use. Download `generate_version_package.ps1` alongside the server and matching library, and run the following with PowerShell 7 from the server's working directory (replace the paths with your own):
+RadServer also needs compatible version data which is not included in the release. Obtain `blocks.json`, `items.json`, `entities.json`, and `menus.json` separately, with rights appropriate to your use. On Windows, the GUI offers version setup on first launch. For manual setup, use the repository's `scripts/generate_version_package.ps1` with PowerShell 7 from the server's working directory (replace the paths with your own):
 
 ```powershell
-pwsh ./generate_version_package.ps1 -DataDir <data-directory> -LibraryPath <downloaded-library> -OutDir ./versions/26.3
+pwsh <repository>/scripts/generate_version_package.ps1 -DataDir <data-directory> -LibraryPath <downloaded-library> -OutDir ./versions/26.3
 ```
 
 This creates `versions/version.toml` and `versions/26.3/` with the library, data and manifest. **It replaces an existing `versions/26.3` directory**; add `-BackupExisting` to preserve the previous package. Start the downloaded server from that working directory, using `--nogui` for terminal mode. Release assets are individual downloads; GitHub Actions workflow artifacts are separately packaged by GitHub for download.

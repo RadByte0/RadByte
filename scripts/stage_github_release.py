@@ -2,7 +2,6 @@
 """Stage platform-specific binaries as individually downloadable release assets."""
 
 import argparse
-import hashlib
 import shutil
 from pathlib import Path
 
@@ -28,14 +27,9 @@ def stage(target: str, build_dir: Path, output_dir: Path) -> None:
         if not (build_dir / source).is_file():
             raise FileNotFoundError(f"Missing build output: {build_dir / source}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    checksums = []
     for source, destination in files:
         staged = output_dir / destination
         shutil.copy2(build_dir / source, staged)
-        with staged.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        checksums.append(f"{digest}  {destination}\n")
-    (output_dir / f"SHA256SUMS-{target}.txt").write_text("".join(checksums), encoding="utf-8")
 
 
 def main() -> None:

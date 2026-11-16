@@ -1177,14 +1177,14 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rad-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rad-core",
 ]
 
 [[package]]
 name = "rad-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes",
  "bytes",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "rad-limbo"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "mimalloc",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "rad-proxy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "rad-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "libloading",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "rad-version"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "rad-core",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "rad-version-26-3"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "flate2",

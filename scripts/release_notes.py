@@ -30,17 +30,15 @@ def main() -> None:
             os_name = next(name for key, name in labels.items() if key in target)
             arch = "x64" if target.startswith("x86_64") else "ARM64"
             asset = link("Download", f"rad-{service}-{target}{suffix}")
-            checksum = link("SHA-256", f"SHA256SUMS-{target}.txt")
-            lines.append(f"- **{os_name} {arch}:** {asset} · {checksum}")
+            lines.append(f"- **{os_name} {arch}:** {asset}")
         lines += ["", "</details>", ""]
     lines += ["<details>", "<summary>Version libraries</summary>", "", "**Minecraft 26.3**", ""]
     for target, (_, library, libext) in TARGETS.items():
         os_name = next(name for key, name in labels.items() if key in target)
         arch = "x64" if target.startswith("x86_64") else "ARM64"
         asset = link("Download", f"{library}-{target}{libext}")
-        checksum = link("SHA-256", f"SHA256SUMS-{target}.txt")
-        lines.append(f"- **{os_name} {arch}:** {asset} · {checksum}")
-    lines += ["", "</details>", "", link("Version package setup script", "generate_version_package.ps1"), ""]
+        lines.append(f"- **{os_name} {arch}:** {asset}")
+    lines += ["", "</details>", ""]
     Path("release-notes.md").write_text("\n".join(lines), encoding="utf-8")
 
 

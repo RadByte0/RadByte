@@ -68,8 +68,6 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
-      - name: Include version package generator
-        run: cp scripts/generate_version_package.ps1 release-assets/
       - name: Generate grouped release downloads
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
