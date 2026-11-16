@@ -5,6 +5,7 @@
 #[cfg(windows)]
 mod gui_windows;
 mod version_selection;
+mod version_download;
 
 use std::path::{Path, PathBuf};
 
@@ -79,6 +80,11 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+    if let Err(e) = version_download::install_missing(&version_package) {
+        error!(error = %e, "failed to install missing version library");
+        std::process::exit(1);
+    }
 
     let lib_path = match version_package.verify_and_resolve_library_path() {
         Ok(p) => p,

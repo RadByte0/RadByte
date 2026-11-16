@@ -22,198 +22,63 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            archive: zip
-            bin_ext: .exe
-            lib_prefix: ''
-            lib_ext: .dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            archive: zip
-            bin_ext: .exe
-            lib_prefix: ''
-            lib_ext: .dll
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
-            bin_ext: ''
-            lib_prefix: lib
-            lib_ext: .so
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            archive: tar.gz
-            bin_ext: ''
-            lib_prefix: lib
-            lib_ext: .so
-
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}, wasm32-unknown-unknown
-
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
-
-      - name: Build workspace binaries
+      - name: Build workspace
+        env:
+          RADBYTE_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          RADBYTE_RELEASE_REPOSITORY: ${{ github.repository }}
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
-
-      - name: Build example WASM Radon guests
-        run: |
-          cargo build --manifest-path examples/radon-guest-example/Cargo.toml --target wasm32-unknown-unknown --release
-          cargo build --manifest-path examples/radon-guest-proxy/Cargo.toml --target wasm32-unknown-unknown --release
-
-      - name: Stage and package archive (Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "v0.1.2" }
-          $target = "${{ matrix.target }}"
-          $relDir = "target/$target/release"
-          $pkgName = "RadByte-$tag-$target"
-          $stage = Join-Path "artifacts" $pkgName
-          New-Item -ItemType Directory -Force -Path "$stage/RadServer/config", "$stage/RadServer/versions/26.3", "$stage/RadServer/radons", "$stage/RadServer/radonfigs" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$stage/RadProxy/radons", "$stage/RadProxy/radonfigs" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$stage/RadLimbo", "$stage/examples" | Out-Null
-
-          Copy-Item "$relDir/rad-server.exe" "$stage/RadServer/"
-          Copy-Item "$relDir/rad_version_26_3.dll" "$stage/RadServer/versions/26.3/"
-          Copy-Item "config/templates/RadServer/rad.properties" "$stage/RadServer/rad.properties"
-          Copy-Item "config/templates/radserver-extra.properties" "$stage/RadServer/config/radserver-extra.properties"
-          [IO.File]::WriteAllText("$stage/RadServer/versions/version.toml", "# Select an installed and supported Minecraft version.`nversion = `"26.3`"`n", [Text.UTF8Encoding]::new($false))
-
-          Copy-Item "$relDir/rad-proxy.exe" "$stage/RadProxy/"
-          Copy-Item "config/templates/RadProxy/rad.properties" "$stage/RadProxy/rad.properties"
-
-          Copy-Item "$relDir/rad-limbo.exe" "$stage/RadLimbo/"
-          Copy-Item "config/templates/RadLimbo/rad.properties" "$stage/RadLimbo/rad.properties"
-
-          Copy-Item "examples/radon-guest-example/target/wasm32-unknown-unknown/release/radon_guest_example.wasm" "$stage/examples/"
-          Copy-Item "examples/radon-guest-proxy/target/wasm32-unknown-unknown/release/radon_guest_proxy.wasm" "$stage/examples/"
-
-          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
-          $zipPath = "release-assets/$pkgName.zip"
-          Compress-Archive -Path "$stage/*" -DestinationPath $zipPath -Force
-          $hash = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
-          [IO.File]::WriteAllText("$zipPath.sha256", "$hash  $pkgName.zip`n", [Text.UTF8Encoding]::new($false))
-
-      - name: Stage and package archive (Unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.2' }}"
-          TARGET="${{ matrix.target }}"
-          REL_DIR="target/${TARGET}/release"
-          PKG_NAME="RadByte-${TAG}-${TARGET}"
-          STAGE="artifacts/${PKG_NAME}"
-          LIB_NAME="${{ matrix.lib_prefix }}rad_version_26_3${{ matrix.lib_ext }}"
-
-          mkdir -p "${STAGE}/RadServer/config" "${STAGE}/RadServer/versions/26.3" "${STAGE}/RadServer/radons" "${STAGE}/RadServer/radonfigs"
-          mkdir -p "${STAGE}/RadProxy/radons" "${STAGE}/RadProxy/radonfigs"
-          mkdir -p "${STAGE}/RadLimbo" "${STAGE}/examples" release-assets
-
-          cp "${REL_DIR}/rad-server" "${STAGE}/RadServer/"
-          cp "${REL_DIR}/${LIB_NAME}" "${STAGE}/RadServer/versions/26.3/"
-          cp "config/templates/RadServer/rad.properties" "${STAGE}/RadServer/rad.properties"
-          cp "config/templates/radserver-extra.properties" "${STAGE}/RadServer/config/radserver-extra.properties"
-          printf '# Select an installed and supported Minecraft version.\nversion = "26.3"\n' > "${STAGE}/RadServer/versions/version.toml"
-
-          cp "${REL_DIR}/rad-proxy" "${STAGE}/RadProxy/"
-          cp "config/templates/RadProxy/rad.properties" "${STAGE}/RadProxy/rad.properties"
-
-          cp "${REL_DIR}/rad-limbo" "${STAGE}/RadLimbo/"
-          cp "config/templates/RadLimbo/rad.properties" "${STAGE}/RadLimbo/rad.properties"
-
-          cp "examples/radon-guest-example/target/wasm32-unknown-unknown/release/radon_guest_example.wasm" "${STAGE}/examples/"
-          cp "examples/radon-guest-proxy/target/wasm32-unknown-unknown/release/radon_guest_proxy.wasm" "${STAGE}/examples/"
-
-          tar -C artifacts -czf "release-assets/${PKG_NAME}.tar.gz" "${PKG_NAME}"
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd release-assets && sha256sum "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256")
-          else
-            (cd release-assets && shasum -a 256 "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256")
-          fi
-
+      - name: Stage individual release files
+        run: python scripts/stage_github_release.py --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: radbyte-${{ matrix.target }}
           path: release-assets/*
-
-  build-macos:
-    name: Build (macOS universal / aarch64 + x86_64)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin, wasm32-unknown-unknown
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-macos
-
-      - name: Build example WASM Radon guests
-        run: |
-          cargo build --manifest-path examples/radon-guest-example/Cargo.toml --target wasm32-unknown-unknown --release
-          cargo build --manifest-path examples/radon-guest-proxy/Cargo.toml --target wasm32-unknown-unknown --release
-
-      - name: Build and package macOS targets
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.2' }}"
-          mkdir -p release-assets
-
-          for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --workspace --release --locked --target "${TARGET}"
-            REL_DIR="target/${TARGET}/release"
-            PKG_NAME="RadByte-${TAG}-${TARGET}"
-            STAGE="artifacts/${PKG_NAME}"
-
-            mkdir -p "${STAGE}/RadServer/config" "${STAGE}/RadServer/versions/26.3" "${STAGE}/RadServer/radons" "${STAGE}/RadServer/radonfigs"
-            mkdir -p "${STAGE}/RadProxy/radons" "${STAGE}/RadProxy/radonfigs"
-            mkdir -p "${STAGE}/RadLimbo" "${STAGE}/examples"
-
-            cp "${REL_DIR}/rad-server" "${STAGE}/RadServer/"
-            cp "${REL_DIR}/librad_version_26_3.dylib" "${STAGE}/RadServer/versions/26.3/"
-            cp "config/templates/RadServer/rad.properties" "${STAGE}/RadServer/rad.properties"
-            cp "config/templates/radserver-extra.properties" "${STAGE}/RadServer/config/radserver-extra.properties"
-            printf '# Select an installed and supported Minecraft version.\nversion = "26.3"\n' > "${STAGE}/RadServer/versions/version.toml"
-
-            cp "${REL_DIR}/rad-proxy" "${STAGE}/RadProxy/"
-            cp "config/templates/RadProxy/rad.properties" "${STAGE}/RadProxy/rad.properties"
-
-            cp "${REL_DIR}/rad-limbo" "${STAGE}/RadLimbo/"
-            cp "config/templates/RadLimbo/rad.properties" "${STAGE}/RadLimbo/rad.properties"
-
-            cp "examples/radon-guest-example/target/wasm32-unknown-unknown/release/radon_guest_example.wasm" "${STAGE}/examples/"
-            cp "examples/radon-guest-proxy/target/wasm32-unknown-unknown/release/radon_guest_proxy.wasm" "${STAGE}/examples/"
-
-            tar -C artifacts -czf "release-assets/${PKG_NAME}.tar.gz" "${PKG_NAME}"
-            (cd release-assets && shasum -a 256 "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256")
-          done
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: radbyte-macos
-          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
 
   release:
     name: Publish GitHub Release
-    needs: [build, build-macos]
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-
-      - name: Publish Release
+      - name: Include version package generator
+        run: cp scripts/generate_version_package.ps1 release-assets/
+      - name: Generate grouped release downloads
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/release_notes.py
+      - name: Publish individual files
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          body_path: release-notes.md
           files: release-assets/*
