@@ -44,18 +44,6 @@ jobs:
             bin_ext: ''
             lib_prefix: lib
             lib_ext: .so
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-            bin_ext: ''
-            lib_prefix: lib
-            lib_ext: .dylib
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-            bin_ext: ''
-            lib_prefix: lib
-            lib_ext: .dylib
 
     steps:
       - uses: actions/checkout@v4
@@ -153,9 +141,69 @@ jobs:
           name: radbyte-${{ matrix.target }}
           path: release-assets/*
 
+  build-macos:
+    name: Build (macOS universal / aarch64 + x86_64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin, wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+
+      - name: Build example WASM Radon guests
+        run: |
+          cargo build --manifest-path examples/radon-guest-example/Cargo.toml --target wasm32-unknown-unknown --release
+          cargo build --manifest-path examples/radon-guest-proxy/Cargo.toml --target wasm32-unknown-unknown --release
+
+      - name: Build and package macOS targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v0.1.2' }}"
+          mkdir -p release-assets
+
+          for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --workspace --release --locked --target "${TARGET}"
+            REL_DIR="target/${TARGET}/release"
+            PKG_NAME="RadByte-${TAG}-${TARGET}"
+            STAGE="artifacts/${PKG_NAME}"
+
+            mkdir -p "${STAGE}/RadServer/config" "${STAGE}/RadServer/versions/26.3" "${STAGE}/RadServer/radons" "${STAGE}/RadServer/radonfigs"
+            mkdir -p "${STAGE}/RadProxy/radons" "${STAGE}/RadProxy/radonfigs"
+            mkdir -p "${STAGE}/RadLimbo" "${STAGE}/examples"
+
+            cp "${REL_DIR}/rad-server" "${STAGE}/RadServer/"
+            cp "${REL_DIR}/librad_version_26_3.dylib" "${STAGE}/RadServer/versions/26.3/"
+            cp "config/templates/RadServer/rad.properties" "${STAGE}/RadServer/rad.properties"
+            cp "config/templates/radserver-extra.properties" "${STAGE}/RadServer/config/radserver-extra.properties"
+            printf '# Select an installed and supported Minecraft version.\nversion = "26.3"\n' > "${STAGE}/RadServer/versions/version.toml"
+
+            cp "${REL_DIR}/rad-proxy" "${STAGE}/RadProxy/"
+            cp "config/templates/RadProxy/rad.properties" "${STAGE}/RadProxy/rad.properties"
+
+            cp "${REL_DIR}/rad-limbo" "${STAGE}/RadLimbo/"
+            cp "config/templates/RadLimbo/rad.properties" "${STAGE}/RadLimbo/rad.properties"
+
+            cp "examples/radon-guest-example/target/wasm32-unknown-unknown/release/radon_guest_example.wasm" "${STAGE}/examples/"
+            cp "examples/radon-guest-proxy/target/wasm32-unknown-unknown/release/radon_guest_proxy.wasm" "${STAGE}/examples/"
+
+            tar -C artifacts -czf "release-assets/${PKG_NAME}.tar.gz" "${PKG_NAME}"
+            (cd release-assets && shasum -a 256 "${PKG_NAME}.tar.gz" > "${PKG_NAME}.tar.gz.sha256")
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: radbyte-macos
+          path: release-assets/*
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
