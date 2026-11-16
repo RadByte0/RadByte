@@ -44,6 +44,8 @@ pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
         }
     }
     let tag = option_env!("RADBYTE_RELEASE_TAG")
+        .filter(|tag| !tag.is_empty())
+        .or(Some(concat!("v", env!("CARGO_PKG_VERSION"))))
         .filter(|tag| {
             tag.starts_with('v')
                 && tag
@@ -63,7 +65,8 @@ pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
         "aarch64" => "aarch64-pc-windows-msvc",
         _ => return Err("Unsupported architecture".into()),
     };
-    let name = format!("rad_version_26_3-{target}.dll");
+    let preferred_name = format!("rad-version-26.3-{target}.dll");
+    let legacy_name = format!("rad_version_26_3-{target}.dll");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
@@ -78,10 +81,19 @@ pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
         .map_err(|e| format!("Cannot find release: {e}"))?
         .json()
         .map_err(|e| e.to_string())?;
-    let expected = release["assets"]
+    let assets = release["assets"]
         .as_array()
-        .and_then(|items| items.iter().find(|item| item["name"] == name))
-        .and_then(|item| item["digest"].as_str())
+        .ok_or("Release has no assets.")?;
+    let asset = [&preferred_name, &legacy_name]
+        .into_iter()
+        .find_map(|name| assets.iter().find(|item| item["name"] == *name))
+        .ok_or("This release does not contain a matching version library.")?;
+    let name = asset["name"]
+        .as_str()
+        .ok_or("Invalid library name in release.")?
+        .to_owned();
+    let expected = asset["digest"]
+        .as_str()
         .and_then(|s| s.strip_prefix("sha256:"))
         .ok_or("Release has no SHA-256 for the library.")?;
     let response = client

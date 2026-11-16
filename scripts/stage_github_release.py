@@ -22,7 +22,7 @@ def stage(target: str, build_dir: Path, output_dir: Path) -> None:
         (f"rad-{service}{exe_suffix}", f"rad-{service}-{target}{exe_suffix}")
         for service in ("server", "proxy", "limbo")
     ]
-    files.append((f"{library_name}{library_suffix}", f"{library_name}-{target}{library_suffix}"))
+    files.append((f"{library_name}{library_suffix}", f"rad-version-26.3-{target}{library_suffix}"))
     for source, _ in files:
         if not (build_dir / source).is_file():
             raise FileNotFoundError(f"Missing build output: {build_dir / source}")

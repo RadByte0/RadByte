@@ -21,6 +21,8 @@ struct State {
     controls: H,
     busy: bool,
     error: String,
+    heading: H,
+    subtitle: H,
 }
 
 #[repr(C)]
@@ -55,6 +57,8 @@ unsafe extern "system" {
 #[link(name = "ole32")]
 unsafe extern "system" {
     fn CoTaskMemFree(ptr: *mut core::ffi::c_void);
+    fn CoInitializeEx(reserved: *mut core::ffi::c_void, flags: u32) -> i32;
+    fn CoUninitialize();
 }
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -86,8 +90,10 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
         0x0001 => {
             let mut s = STATE.get().unwrap().lock().unwrap();
             let inst = unsafe { GetModuleHandleW(std::ptr::null()) };
-            let heading = ctrl(h, "STATIC", "Choose a version", 0, 0, inst);
-            let description = ctrl(h, "STATIC", "Minecraft Java Edition", 0, 0, inst);
+            let heading = ctrl(h, "STATIC", "RadServer", 0, 0, inst);
+            let description = ctrl(h, "STATIC", "VERSION SETUP", 0, 0, inst);
+            s.heading = heading;
+            s.subtitle = description;
             let search_label = ctrl(h, "STATIC", "Search", 0, 0, inst);
             s.search = ctrl(h, "EDIT", "", 0x00800000 | 0x0080, 201, inst);
             s.list = ctrl(
@@ -105,22 +111,22 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
             s.status = ctrl(
                 h,
                 "STATIC",
-                "Choose a folder with compatible version data.",
+                "Select the folder containing your version data.",
                 0,
                 0,
                 inst,
             );
             for (item, x, y, width, height) in [
-                (heading, 28, 22, 500, 32),
-                (description, 28, 57, 500, 23),
-                (search_label, 28, 88, 450, 20),
-                (s.search, 28, 112, 580, 30),
-                (s.list, 28, 153, 580, 66),
-                (label, 28, 234, 450, 22),
-                (s.path, 28, 260, 478, 30),
-                (s.browse, 516, 260, 92, 30),
-                (s.status, 28, 304, 580, 45),
-                (s.install, 428, 365, 180, 38),
+                (heading, 26, 18, 260, 34),
+                (description, 26, 57, 260, 22),
+                (search_label, 40, 111, 450, 20),
+                (s.search, 40, 137, 488, 30),
+                (s.list, 40, 180, 488, 70),
+                (label, 40, 271, 450, 22),
+                (s.path, 40, 297, 386, 30),
+                (s.browse, 436, 297, 92, 30),
+                (s.status, 40, 344, 488, 45),
+                (s.install, 348, 405, 180, 38),
             ] {
                 unsafe {
                     MoveWindow(item, x, y, width, height, 1);
@@ -152,24 +158,40 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
             let notification = w >> 16;
             if id == 201 && notification == 0x0300 {
                 let s = STATE.get().unwrap().lock().unwrap();
+                let (search, list) = (s.search, s.list);
+                drop(s);
                 let mut text = [0u16; 256];
                 unsafe {
-                    GetWindowTextW(s.search, text.as_mut_ptr(), 256);
-                    SendMessageW(s.list, 0x0184, 0, 0);
+                    GetWindowTextW(search, text.as_mut_ptr(), 256);
+                    SendMessageW(list, 0x0184, 0, 0);
                 }
                 if matches_version(String::from_utf16_lossy(&text).trim_end_matches('\0')) {
                     unsafe {
                         SendMessageW(
-                            s.list,
+                            list,
                             0x0180,
                             0,
                             wide("26.3    •    Protocol 777    •    Latest supported").as_ptr()
                                 as isize,
                         );
-                        SendMessageW(s.list, 0x0186, 0, 0);
+                        SendMessageW(list, 0x0186, 0, 0);
                     }
                 }
             } else if id == 204 {
+                let initialized = unsafe { CoInitializeEx(std::ptr::null_mut(), 2) };
+                if initialized < 0 {
+                    let s = STATE.get().unwrap().lock().unwrap();
+                    let status = s.status;
+                    drop(s);
+                    unsafe {
+                        SetWindowTextW(
+                            status,
+                            wide("Could not open the folder picker. Enter a folder path instead.")
+                                .as_ptr(),
+                        );
+                    }
+                    return 0;
+                }
                 let mut display = [0u16; 260];
                 let title = wide("Choose the folder containing the version data");
                 let mut info = BrowseInfo {
@@ -177,7 +199,7 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                     root: std::ptr::null(),
                     display: display.as_mut_ptr(),
                     title: title.as_ptr(),
-                    flags: 0x01,
+                    flags: 0x41,
                     callback: 0,
                     data: 0,
                     image: 0,
@@ -187,28 +209,31 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                     let mut path = [0u16; 260];
                     unsafe {
                         if SHGetPathFromIDListW(ptr, path.as_mut_ptr()) != 0 {
-                            SetWindowTextW(
-                                STATE.get().unwrap().lock().unwrap().path,
-                                path.as_ptr(),
-                            );
+                            let path_field = STATE.get().unwrap().lock().unwrap().path;
+                            SetWindowTextW(path_field, path.as_ptr());
                         }
                         CoTaskMemFree(ptr);
                     }
                 }
+                unsafe {
+                    CoUninitialize();
+                }
             } else if id == 205 {
-                let mut s = STATE.get().unwrap().lock().unwrap();
+                let s = STATE.get().unwrap().lock().unwrap();
                 if s.busy {
                     return 0;
                 }
-                if unsafe { SendMessageW(s.list, 0x0188, 0, 0) } < 0 {
+                let (list, status, path_field) = (s.list, s.status, s.path);
+                drop(s);
+                if unsafe { SendMessageW(list, 0x0188, 0, 0) } < 0 {
                     unsafe {
-                        SetWindowTextW(s.status, wide("Select version 26.3 first.").as_ptr());
+                        SetWindowTextW(status, wide("Select version 26.3 first.").as_ptr());
                     }
                     return 0;
                 }
                 let mut path = [0u16; 32768];
                 unsafe {
-                    GetWindowTextW(s.path, path.as_mut_ptr(), path.len() as i32);
+                    GetWindowTextW(path_field, path.as_mut_ptr(), path.len() as i32);
                 }
                 let path = String::from_utf16_lossy(&path)
                     .trim_end_matches('\0')
@@ -217,12 +242,13 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 if path.is_empty() {
                     unsafe {
                         SetWindowTextW(
-                            s.status,
+                            status,
                             wide("Choose the folder containing the four data files.").as_ptr(),
                         );
                     }
                     return 0;
                 }
+                let mut s = STATE.get().unwrap().lock().unwrap();
                 s.busy = true;
                 let versions = s.versions.clone();
                 let (install, browse, status) = (s.install, s.browse, s.status);
@@ -274,6 +300,37 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 let mut rect: Rect = std::mem::zeroed();
                 GetClientRect(h, &mut rect);
                 FillRect(dc, &rect, STATE.get().unwrap().lock().unwrap().background);
+                let s = STATE.get().unwrap().lock().unwrap();
+                rounded_rect(
+                    dc,
+                    &Rect {
+                        left: 24,
+                        top: 94,
+                        right: 544,
+                        bottom: 459,
+                    },
+                    s.controls,
+                    12,
+                );
+                rounded_rect(
+                    dc,
+                    &Rect {
+                        left: 558,
+                        top: 94,
+                        right: 816,
+                        bottom: 273,
+                    },
+                    s.controls,
+                    12,
+                );
+                let old = SelectObject(dc, s.font);
+                draw_text(dc, "VERSION", 575, 111, 210, 0x00aaa6a2);
+                SelectObject(dc, s.title_font);
+                draw_text(dc, "26.3", 575, 143, 210, 0x00eeeae7);
+                SelectObject(dc, s.font);
+                draw_text(dc, "Java Edition", 575, 185, 210, 0x00c8c4c0);
+                draw_text(dc, "Protocol 777", 575, 213, 210, 0x00aaa6a2);
+                SelectObject(dc, old);
                 EndPaint(h, &paint);
             }
             0
@@ -282,8 +339,14 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
             let item = unsafe { &mut *(l as *mut DrawItem) };
             let s = STATE.get().unwrap().lock().unwrap();
             unsafe {
-                FillRect(item.dc, &item.rect, s.background);
-                let brush = CreateSolidBrush(if w == 205 { 0x00945426 } else { 0x00302c28 });
+                FillRect(item.dc, &item.rect, s.controls);
+                let pressed = item.item_state & 1 != 0;
+                let brush = CreateSolidBrush(match (w, pressed) {
+                    (205, true) => 0x00804720,
+                    (205, false) => 0x00945426,
+                    (_, true) => 0x004a4540,
+                    _ => 0x00332f2c,
+                });
                 let previous_brush = SelectObject(item.dc, brush);
                 let previous_pen = SelectObject(item.dc, GetStockObject(8));
                 RoundRect(
@@ -328,16 +391,10 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
             let s = STATE.get().unwrap().lock().unwrap();
             unsafe {
                 SetTextColor(w as H, 0x00e5e7eb);
-                SetBkColor(
-                    w as H,
-                    if msg == 0x0138 {
-                        0x001b1818
-                    } else {
-                        0x00242120
-                    },
-                );
+                let header = l as H == s.heading || l as H == s.subtitle;
+                SetBkColor(w as H, if header { 0x001b1818 } else { 0x00242120 });
             }
-            if msg == 0x0138 {
+            if msg == 0x0138 && (l as H == s.heading || l as H == s.subtitle) {
                 s.background
             } else {
                 s.controls
@@ -412,6 +469,8 @@ pub fn choose(versions: &Path) -> Result<bool, String> {
                 controls,
                 busy: false,
                 error: String::new(),
+                heading: 0,
+                subtitle: 0,
             }))
             .map_err(|_| "Version chooser already initialized")?;
         let instance = GetModuleHandleW(std::ptr::null());
@@ -438,8 +497,8 @@ pub fn choose(versions: &Path) -> Result<bool, String> {
             0x00ca0000 | 0x10000000,
             0x80000000u32 as i32,
             0x80000000u32 as i32,
-            652,
-            460,
+            855,
+            520,
             0,
             0,
             instance,

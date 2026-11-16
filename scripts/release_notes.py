@@ -36,7 +36,7 @@ def main() -> None:
     for target, (_, library, libext) in TARGETS.items():
         os_name = next(name for key, name in labels.items() if key in target)
         arch = "x64" if target.startswith("x86_64") else "ARM64"
-        asset = link("Download", f"{library}-{target}{libext}")
+        asset = link("Download", f"rad-version-26.3-{target}{libext}")
         lines.append(f"- **{os_name} {arch}:** {asset}")
     lines += ["", "</details>", ""]
     Path("release-notes.md").write_text("\n".join(lines), encoding="utf-8")

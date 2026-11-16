@@ -33,6 +33,8 @@ pub fn install_missing(package: &LoadedVersionPackage) -> Result<(), String> {
         return Err("library metadata does not match this platform or has an invalid size".into());
     }
     let tag = option_env!("RADBYTE_RELEASE_TAG")
+        .filter(|s| !s.is_empty())
+        .or(Some(concat!("v", env!("CARGO_PKG_VERSION"))))
         .filter(|s| {
             s.starts_with('v')
                 && s.bytes()
@@ -49,9 +51,9 @@ pub fn install_missing(package: &LoadedVersionPackage) -> Result<(), String> {
         _ => return Err("unsupported platform for automatic library installation".into()),
     };
     let asset = match std::env::consts::OS {
-        "windows" => format!("rad_version_26_3-{target}.dll"),
-        "linux" => format!("librad_version_26_3-{target}.so"),
-        "macos" => format!("librad_version_26_3-{target}.dylib"),
+        "windows" => format!("rad-version-26.3-{target}.dll"),
+        "linux" => format!("rad-version-26.3-{target}.so"),
+        "macos" => format!("rad-version-26.3-{target}.dylib"),
         _ => unreachable!(),
     };
     let repository = option_env!("RADBYTE_RELEASE_REPOSITORY").unwrap_or("RadByte0/RadByte");
@@ -63,13 +65,32 @@ pub fn install_missing(package: &LoadedVersionPackage) -> Result<(), String> {
     }
     let url = format!("https://github.com/{repository}/releases/download/{tag}/{asset}");
     tracing::info!(%url, "downloading missing version library");
-    let response = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let response = client
         .get(url)
         .send()
-        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("library download failed: {e}"))?;
+    let response = if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let old_asset = match std::env::consts::OS {
+            "windows" => format!("rad_version_26_3-{target}.dll"),
+            "linux" => format!("librad_version_26_3-{target}.so"),
+            "macos" => format!("librad_version_26_3-{target}.dylib"),
+            _ => unreachable!(),
+        };
+        client
+            .get(format!(
+                "https://github.com/{repository}/releases/download/{tag}/{old_asset}"
+            ))
+            .send()
+            .map_err(|e| format!("library download failed: {e}"))?
+    } else {
+        response
+    };
+    let response = response
+        .error_for_status()
         .map_err(|e| format!("library download failed: {e}"))?;
     let mut bytes = Vec::new();
     response

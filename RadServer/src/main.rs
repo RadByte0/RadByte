@@ -1,6 +1,7 @@
 //! RadServer — host launcher that verifies and dynamically loads the Minecraft version DLL.
 
 #![warn(missing_docs)]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
 mod gui_windows;
@@ -41,6 +42,14 @@ fn cstr_bytes_to_str(buf: &[u8]) -> &str {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::args_os().skip(1).any(|arg| arg == "--nogui") {
+        // GUI builds do not create a console on double-click; console mode attaches
+        // to an existing terminal while inherited pipes continue to work.
+        unsafe {
+            AttachConsole(u32::MAX);
+        }
+    }
     #[cfg(windows)]
     if !std::env::args_os().skip(1).any(|arg| arg == "--nogui") {
         match gui_windows::run() {
@@ -129,6 +138,12 @@ fn main() {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn AttachConsole(process_id: u32) -> i32;
 }
 
 fn verify_loaded_library_info(
