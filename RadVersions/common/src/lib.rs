@@ -324,9 +324,17 @@ pub fn check_world_compatibility(
     let level_dat = world_dir.join("level.dat");
     if !level_dat.exists() {
         // Check if only empty standard subdirs exist (e.g. region/ and playerdata/ created before first save)
-        let has_world_payload = ["region", "playerdata", "DIM-1", "DIM1", "entities"]
-            .iter()
-            .any(|sub| dir_has_any_entries(&world_dir.join(sub)).unwrap_or(true));
+        let has_world_payload = [
+            "region",
+            "dimensions",
+            "playerdata",
+            "players",
+            "DIM-1",
+            "DIM1",
+            "entities",
+        ]
+        .iter()
+        .any(|sub| dir_has_any_entries(&world_dir.join(sub)).unwrap_or(true));
         if !has_world_payload
             && !world_dir.join("sim_queue.json").exists()
             && !world_dir.join("containers.json").exists()
@@ -345,7 +353,10 @@ pub fn check_world_compatibility(
     }
 
     match read_level_dat_data_version(&level_dat) {
-        Ok(Some(dv)) if dv == target.world_data_version => {
+        Ok(Some(dv))
+            if dv == target.world_data_version
+                || (target.world_data_version == WORLD_DATA_VERSION_26_3 && dv == 5023) =>
+        {
             Ok(WorldCompatibility::ConfirmedLegacyRadByteWorld)
         }
         Ok(Some(dv)) => Ok(WorldCompatibility::Incompatible {

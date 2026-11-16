@@ -52,6 +52,7 @@ pub fn spawn_tick_loop_with_shutdown(
 
             let sim_area = state.simulation_area().await;
             step_world_tick_in_area(&state, &sim_area).await;
+            step_player_portals(&state).await;
             let (sim_updates, fb_spawns, fb_moves, fb_removed, support_drops) = {
                 let mut world = state.world.write().await;
                 let mut sim = state.world_sim.write().await;
@@ -878,5 +879,128 @@ pub(super) async fn apply_player_damage(
 
     if died {
         state.broadcast_chat(format!("{username} died.")).await;
+    }
+}
+
+/// Checks if any active player is standing in a Nether or End portal and transitions dimensions.
+pub async fn step_player_portals(state: &ServerState) {
+    use crate::registries::state_in_entry;
+    use crate::world::worldgen::DimensionId;
+
+    let nether_portal = state.registries.block_by_name("minecraft:nether_portal");
+    let end_portal = state.registries.block_by_name("minecraft:end_portal");
+    if nether_portal.is_none() && end_portal.is_none() {
+        return;
+    }
+
+    let snapshot: Vec<(i32, DimensionId, f64, f64, f64, u8, bool)> = {
+        let players = state.players.read().await;
+        players
+            .iter()
+            .map(|(&eid, p)| (eid, p.dimension, p.x, p.y, p.z, p.game_mode, p.dead))
+            .collect()
+    };
+
+    type PortalTransition = (
+        i32,
+        DimensionId,
+        (f64, f64, f64),
+        crate::world::portals::PortalBlockUpdates,
+    );
+    let mut transitions: Vec<PortalTransition> = Vec::new();
+
+    {
+        let mut world = state.world.write().await;
+        let mut pstate = state.portal_state.write().await;
+
+        // Prune disconnected players.
+        pstate.retain(|eid, _| snapshot.iter().any(|(id, ..)| id == eid));
+
+        for (eid, dim, x, y, z, mode, dead) in snapshot {
+            let entry = pstate.entry(eid).or_insert((0, 0));
+            if entry.1 > 0 {
+                entry.1 -= 1;
+            }
+            if dead {
+                entry.0 = 0;
+                continue;
+            }
+            let bx = x.floor() as i32;
+            let by = y.floor() as i32;
+            let bz = z.floor() as i32;
+            let feet_block = world.get_block_in(dim, bx, by, bz);
+
+            if end_portal
+                .as_ref()
+                .is_some_and(|ep| state_in_entry(ep, feet_block))
+            {
+                if entry.1 == 0 {
+                    entry.0 = 0;
+                    entry.1 = 40;
+                    if dim == DimensionId::End {
+                        let spawn = (
+                            state.config.spawn_x,
+                            state.config.spawn_y,
+                            state.config.spawn_z,
+                        );
+                        transitions.push((eid, DimensionId::Overworld, spawn, Vec::new()));
+                    } else {
+                        let updates = crate::world::portals::ensure_end_spawn_platform(&mut world);
+                        transitions.push((eid, DimensionId::End, (100.5, 49.0, 0.5), updates));
+                    }
+                }
+                continue;
+            }
+
+            if nether_portal
+                .as_ref()
+                .is_some_and(|np| state_in_entry(np, feet_block))
+                && matches!(dim, DimensionId::Overworld | DimensionId::Nether)
+            {
+                if entry.1 == 0 {
+                    let threshold = if mode == 1 { 1 } else { 80 };
+                    entry.0 = entry.0.saturating_add(1);
+                    if entry.0 >= threshold {
+                        entry.0 = 0;
+                        entry.1 = 80;
+                        let target_dim = if dim == DimensionId::Overworld {
+                            DimensionId::Nether
+                        } else {
+                            DimensionId::Overworld
+                        };
+                        let (tx, tz) = if dim == DimensionId::Overworld {
+                            (bx.div_euclid(8), bz.div_euclid(8))
+                        } else {
+                            (bx.saturating_mul(8), bz.saturating_mul(8))
+                        };
+                        let (target_pos, updates) =
+                            crate::world::portals::find_or_create_nether_portal(
+                                &mut world, target_dim, tx, by, tz,
+                            );
+                        transitions.push((eid, target_dim, target_pos, updates));
+                    }
+                }
+            } else {
+                entry.0 = 0;
+            }
+        }
+    }
+
+    for (eid, target_dim, target_pos, updates) in transitions {
+        state
+            .switch_player_dimension_at(eid, target_dim, Some(target_pos))
+            .await;
+        for (ux, uy, uz, st) in updates {
+            state
+                .broadcast_in_dimension_except(
+                    target_dim,
+                    &BlockUpdate {
+                        pos: BlockPos::new(ux, uy, uz),
+                        block_state: VarInt(i32::from(st)),
+                    },
+                    None,
+                )
+                .await;
+        }
     }
 }

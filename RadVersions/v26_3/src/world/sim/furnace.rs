@@ -179,17 +179,19 @@ impl FurnaceStore {
     }
 
     /// Removes a furnace in `dim` when broken.
-    pub fn remove_in(&mut self, dim: DimensionId, x: i32, y: i32, z: i32) {
-        if self.furnaces.remove(&(dim, x, y, z)).is_some() {
+    pub fn remove_in(&mut self, dim: DimensionId, x: i32, y: i32, z: i32) -> Option<FurnaceEntity> {
+        let removed = self.furnaces.remove(&(dim, x, y, z));
+        if removed.is_some() {
             self.dirty = true;
             self.revision = self.revision.wrapping_add(1);
         }
+        removed
     }
 
     /// Removes a furnace in Overworld when broken.
     #[allow(dead_code)]
-    pub fn remove(&mut self, x: i32, y: i32, z: i32) {
-        self.remove_in(DimensionId::Overworld, x, y, z);
+    pub fn remove(&mut self, x: i32, y: i32, z: i32) -> Option<FurnaceEntity> {
+        self.remove_in(DimensionId::Overworld, x, y, z)
     }
 
     /// Returns a reference to a furnace at `(dim, x, y, z)`.
@@ -297,6 +299,15 @@ impl FurnaceStore {
         Some((self.revision, items))
     }
 
+    /// Returns a snapshot of all furnace block entities `(dim, x, y, z, entity)`.
+    #[must_use]
+    pub fn all_furnaces(&self) -> Vec<(DimensionId, i32, i32, i32, FurnaceEntity)> {
+        self.furnaces
+            .iter()
+            .map(|(&(dim, x, y, z), f)| (dim, x, y, z, f.clone()))
+            .collect()
+    }
+
     /// Clears the dirty flag after save succeeds only if no newer mutation occurred.
     pub fn mark_saved(&mut self, expected_rev: u64) {
         if self.revision == expected_rev {
@@ -304,11 +315,18 @@ impl FurnaceStore {
         }
     }
 
-    /// Atomically writes `world/furnaces.json`.
+    /// Atomically writes `world/furnaces.json`, or removes it when empty.
     pub fn write_snapshot_atomic(
         world_dir: &Path,
         snap: &[(DimensionId, i32, i32, i32, FurnaceEntity)],
     ) -> std::io::Result<()> {
+        let path = world_dir.join("furnaces.json");
+        if snap.is_empty() {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Ok(());
+        }
         std::fs::create_dir_all(world_dir)?;
         let records: Vec<SavedFurnaceRecord> = snap
             .iter()
@@ -320,7 +338,6 @@ impl FurnaceStore {
                 furnace: f.clone(),
             })
             .collect();
-        let path = world_dir.join("furnaces.json");
         let tmp = world_dir.join(format!("furnaces.json.{}.tmp", std::process::id()));
         let json = serde_json::to_string_pretty(&records)
             .map_err(|e| std::io::Error::other(format!("furnaces serialize failed: {e}")))?;

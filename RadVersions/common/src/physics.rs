@@ -169,7 +169,13 @@ pub fn validate_player_move_with_pose_lookup_with<L: BlockCollisionLookup + ?Siz
     let dz = to.2 - from.2;
     let dist_sq = dx * dx + dy * dy + dz * dz;
 
-    let max_speed = if allow_flight { 22.0 } else { 12.0 };
+    let max_speed = if noclip {
+        120.0
+    } else if allow_flight {
+        22.0
+    } else {
+        12.0
+    };
     let max_step = max_speed * elapsed_secs.clamp(0.05, 0.5) + 0.5;
     if !dist_sq.is_finite()
         || !to.0.is_finite()

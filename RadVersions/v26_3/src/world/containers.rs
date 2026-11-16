@@ -265,6 +265,48 @@ impl ContainerStore {
         Ok(Some((self.revision, bytes)))
     }
 
+    /// Returns a snapshot of all chest containers `(dim, x, y, z, slots, components)`.
+    #[allow(clippy::type_complexity)]
+    #[must_use]
+    pub fn all_chests(
+        &self,
+    ) -> Vec<(
+        DimensionId,
+        i32,
+        i32,
+        i32,
+        Vec<SimpleSlot>,
+        Vec<ItemComponentPatch>,
+    )> {
+        self.chests
+            .iter()
+            .map(|(&(dim, x, y, z), slots)| {
+                let comps = self
+                    .chest_components
+                    .get(&(dim, x, y, z))
+                    .cloned()
+                    .unwrap_or_else(|| vec![ItemComponentPatch::default(); CHEST_SLOTS]);
+                (dim, x, y, z, slots.clone(), comps)
+            })
+            .collect()
+    }
+
+    /// Inserts or replaces a chest's slots and components (used when loading from `.mca`).
+    pub fn set_chest_slots_in(
+        &mut self,
+        dim: DimensionId,
+        x: i32,
+        y: i32,
+        z: i32,
+        mut slots: Vec<SimpleSlot>,
+        mut components: Vec<ItemComponentPatch>,
+    ) {
+        slots.resize(CHEST_SLOTS, SimpleSlot::default());
+        components.resize(CHEST_SLOTS, ItemComponentPatch::default());
+        self.chests.insert((dim, x, y, z), slots);
+        self.chest_components.insert((dim, x, y, z), components);
+    }
+
     /// Clears the dirty flag after a confirmed save only if no newer mutation occurred.
     pub fn mark_saved(&mut self, expected_rev: u64) {
         if self.revision == expected_rev {
@@ -272,10 +314,17 @@ impl ContainerStore {
         }
     }
 
-    /// Atomically writes serialized container JSON to `<world_dir>/containers.json`.
+    /// Atomically writes serialized container JSON to `<world_dir>/containers.json`,
+    /// or removes the file when empty.
     pub fn write_snapshot_atomic(world_dir: &Path, json_bytes: &[u8]) -> std::io::Result<()> {
-        std::fs::create_dir_all(world_dir)?;
         let path = world_dir.join("containers.json");
+        if json_bytes.trim_ascii() == b"[]" {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Ok(());
+        }
+        std::fs::create_dir_all(world_dir)?;
         let tmp_path = world_dir.join(format!(
             "containers.json.{}",
             crate::net::unique_tmp_suffix()

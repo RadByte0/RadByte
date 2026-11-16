@@ -79,9 +79,9 @@ $plan = if ($Profile -eq "Direct") {
     )
 } else {
     @(
-        @{ Name = "RadLimbo";  Bin = "rad-limbo.exe";  Cfg = "radlimbo.toml";  DefHost = "127.0.0.1"; DefPort = 25566 },
+        @{ Name = "RadLimbo";  Bin = "rad-limbo.exe";  Cfg = "rad.properties"; DefHost = "127.0.0.1"; DefPort = 25566 },
         @{ Name = "RadServer"; Bin = "rad-server.exe"; Cfg = "rad.properties"; DefHost = "127.0.0.1"; DefPort = 25567 },
-        @{ Name = "RadProxy";  Bin = "rad-proxy.exe";  Cfg = "radproxy.toml";  DefHost = "127.0.0.1"; DefPort = 25565 }
+        @{ Name = "RadProxy";  Bin = "rad-proxy.exe";  Cfg = "rad.properties"; DefHost = "127.0.0.1"; DefPort = 25565 }
     )
 }
 
@@ -106,7 +106,9 @@ try {
         }
         $ep = Get-BindEndpoint -ConfigPath $cfgForEndpoint -DefaultHost $svc.DefHost -DefaultPort $svc.DefPort
 
-        $proc = Start-Process `
+        $startParams = @{}
+        if ($svc.Name -eq "RadServer") { $startParams.ArgumentList = @('--nogui') }
+        $proc = Start-Process @startParams `
             -FilePath $exePath `
             -WorkingDirectory $svcDir `
             -WindowStyle Hidden `

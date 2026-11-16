@@ -21,18 +21,29 @@ pub enum MobKind {
     Pig,
     /// Hostile ranged/melee skeleton mob.
     Skeleton,
+    /// Hostile creeper mob.
+    Creeper,
+    /// Hostile spider mob.
+    Spider,
+    /// Neutral enderman mob.
+    Enderman,
+    /// Passive cow mob.
+    Cow,
+    /// Passive sheep mob.
+    Sheep,
+    /// Passive chicken mob.
+    Chicken,
+    /// Passive villager mob.
+    Villager,
+    /// Neutral iron golem mob.
+    IronGolem,
 }
 
 impl MobKind {
     /// Parses a mob name from `/summon`.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
-        match name.trim().to_ascii_lowercase().as_str() {
-            "zombie" => Some(Self::Zombie),
-            "pig" => Some(Self::Pig),
-            "skeleton" => Some(Self::Skeleton),
-            _ => None,
-        }
+        Self::from_resource_name(name)
     }
 
     /// Minecraft 26.3 entity type registry ID from `entities`.
@@ -42,6 +53,14 @@ impl MobKind {
             Self::Zombie => entities.zombie,
             Self::Pig => entities.pig,
             Self::Skeleton => entities.skeleton,
+            Self::Creeper => entities.creeper,
+            Self::Spider => entities.spider,
+            Self::Enderman => entities.enderman,
+            Self::Cow => entities.cow,
+            Self::Sheep => entities.sheep,
+            Self::Chicken => entities.chicken,
+            Self::Villager => entities.villager,
+            Self::IronGolem => entities.iron_golem,
         }
     }
 
@@ -49,8 +68,15 @@ impl MobKind {
     #[must_use]
     pub const fn dimensions(self) -> (f64, f64) {
         match self {
-            Self::Zombie | Self::Skeleton => (0.3, 1.95),
+            Self::Zombie | Self::Skeleton | Self::Villager => (0.3, 1.95),
+            Self::Creeper => (0.3, 1.7),
+            Self::Spider => (0.7, 0.9),
+            Self::Enderman => (0.3, 2.9),
             Self::Pig => (0.45, 0.9),
+            Self::Cow => (0.45, 1.4),
+            Self::Sheep => (0.45, 1.3),
+            Self::Chicken => (0.2, 0.7),
+            Self::IronGolem => (0.7, 2.7),
         }
     }
 
@@ -58,8 +84,13 @@ impl MobKind {
     #[must_use]
     pub const fn max_hp(self) -> f32 {
         match self {
-            Self::Zombie | Self::Skeleton => 20.0,
-            Self::Pig => 10.0,
+            Self::Zombie | Self::Skeleton | Self::Creeper | Self::Villager => 20.0,
+            Self::Spider => 16.0,
+            Self::Enderman => 40.0,
+            Self::Pig | Self::Cow => 10.0,
+            Self::Sheep => 8.0,
+            Self::Chicken => 4.0,
+            Self::IronGolem => 100.0,
         }
     }
 
@@ -67,16 +98,60 @@ impl MobKind {
     #[must_use]
     pub const fn speed_per_tick(self) -> f64 {
         match self {
-            Self::Zombie => 0.11,
+            Self::Zombie | Self::Creeper => 0.11,
             Self::Skeleton => 0.12,
-            Self::Pig => 0.08,
+            Self::Spider => 0.13,
+            Self::Enderman => 0.14,
+            Self::Villager | Self::IronGolem => 0.09,
+            Self::Pig | Self::Cow | Self::Sheep | Self::Chicken => 0.08,
         }
     }
 
     /// Whether this mob actively targets survival players.
     #[must_use]
     pub const fn is_hostile(self) -> bool {
-        matches!(self, Self::Zombie | Self::Skeleton)
+        matches!(
+            self,
+            Self::Zombie | Self::Skeleton | Self::Creeper | Self::Spider
+        )
+    }
+
+    /// Vanilla namespaced entity ID.
+    #[must_use]
+    pub const fn resource_name(self) -> &'static str {
+        match self {
+            Self::Zombie => "minecraft:zombie",
+            Self::Pig => "minecraft:pig",
+            Self::Skeleton => "minecraft:skeleton",
+            Self::Creeper => "minecraft:creeper",
+            Self::Spider => "minecraft:spider",
+            Self::Enderman => "minecraft:enderman",
+            Self::Cow => "minecraft:cow",
+            Self::Sheep => "minecraft:sheep",
+            Self::Chicken => "minecraft:chicken",
+            Self::Villager => "minecraft:villager",
+            Self::IronGolem => "minecraft:iron_golem",
+        }
+    }
+
+    /// Parses a Vanilla namespaced entity ID into [`MobKind`].
+    #[must_use]
+    pub fn from_resource_name(name: &str) -> Option<Self> {
+        let trimmed = name.trim().to_ascii_lowercase();
+        match trimmed.strip_prefix("minecraft:").unwrap_or(&trimmed) {
+            "zombie" => Some(Self::Zombie),
+            "pig" => Some(Self::Pig),
+            "skeleton" => Some(Self::Skeleton),
+            "creeper" => Some(Self::Creeper),
+            "spider" => Some(Self::Spider),
+            "enderman" => Some(Self::Enderman),
+            "cow" => Some(Self::Cow),
+            "sheep" => Some(Self::Sheep),
+            "chicken" => Some(Self::Chicken),
+            "villager" => Some(Self::Villager),
+            "iron_golem" => Some(Self::IronGolem),
+            _ => None,
+        }
     }
 }
 
@@ -609,6 +684,22 @@ impl EntityManager {
         }
     }
 
+    /// Inserts a pre-built/restored [`MobEntity`] (used on world load).
+    pub fn insert_mob(&mut self, mob: MobEntity) {
+        if mob.hp > 0.0 {
+            let chunk = (
+                mob.dimension,
+                (mob.x.floor() as i32).div_euclid(16),
+                (mob.z.floor() as i32).div_euclid(16),
+            );
+            self.chunk_buckets
+                .entry(chunk)
+                .or_default()
+                .push(mob.entity_id);
+            self.mobs.insert(mob.entity_id, mob);
+        }
+    }
+
     /// Number of active dropped item entities.
     #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
@@ -642,7 +733,6 @@ impl EntityManager {
     }
 
     /// Returns all active mobs.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn all_mobs(&self) -> impl Iterator<Item = &MobEntity> {
         self.mobs.values()
     }
@@ -1230,18 +1320,403 @@ pub fn load_dropped_items_from_dir(world_dir: &std::path::Path) -> Vec<DroppedIt
     serde_json::from_str::<Vec<DroppedItemEntity>>(&text).unwrap_or_default()
 }
 
-/// Atomically writes `items` to `<world_dir>/dropped_items.json` using `.tmp` + rename.
+/// Atomically writes `items` to `<world_dir>/dropped_items.json` using `.tmp` + rename,
+/// or removes the file if `items` is empty.
 pub fn write_dropped_items_atomic(
     world_dir: &std::path::Path,
     items: &[DroppedItemEntity],
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(world_dir)?;
     let path = world_dir.join("dropped_items.json");
+    if items.is_empty() {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Ok(());
+    }
+    std::fs::create_dir_all(world_dir)?;
     let tmp = world_dir.join("dropped_items.json.tmp");
     let json = serde_json::to_string_pretty(items)
         .map_err(|e| std::io::Error::other(format!("serialize dropped_items: {e}")))?;
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Loads dropped items from Vanilla Anvil `entities/*.mca` across all dimensions,
+/// falling back to legacy `<world_dir>/dropped_items.json` if present.
+#[cfg_attr(not(test), allow(dead_code))]
+#[must_use]
+pub fn load_dropped_items_from_world_mca(
+    world_dir: &std::path::Path,
+    registries: &crate::registries::Version26_3Registries,
+) -> Vec<DroppedItemEntity> {
+    load_entities_from_world_mca(world_dir, registries).0
+}
+
+/// Loads dropped items and mobs from Vanilla Anvil `entities/*.mca` for a single chunk `(dim, cx, cz)`.
+#[must_use]
+pub fn load_entities_in_chunk_from_mca(
+    world_dir: &std::path::Path,
+    dim: DimensionId,
+    cx: i32,
+    cz: i32,
+    next_eid: &mut i32,
+    registries: &crate::registries::Version26_3Registries,
+) -> (Vec<DroppedItemEntity>, Vec<MobEntity>) {
+    let mut items = Vec::new();
+    let mut mobs = Vec::new();
+    let dim_dir = crate::world::dimension_dir_for(world_dir, dim);
+    if let Ok(Some(compressed)) =
+        crate::world::anvil::AnvilRegion::read_subdir_chunk_payload_checked(
+            &dim_dir, "entities", cx, cz,
+        )
+    {
+        decode_entities_chunk_payload(
+            &compressed,
+            dim,
+            registries,
+            next_eid,
+            &mut items,
+            &mut mobs,
+        );
+    }
+    (items, mobs)
+}
+
+/// Loads dropped items and mobs from Vanilla Anvil `entities/*.mca` across all dimensions,
+/// falling back to legacy `<world_dir>/dropped_items.json` for items if present.
+#[must_use]
+pub fn load_entities_from_world_mca(
+    world_dir: &std::path::Path,
+    registries: &crate::registries::Version26_3Registries,
+) -> (Vec<DroppedItemEntity>, Vec<MobEntity>) {
+    let mut items = Vec::new();
+    let mut mobs = Vec::new();
+    let mut next_eid = 10_000_i32;
+
+    for dim in [
+        DimensionId::Overworld,
+        DimensionId::Nether,
+        DimensionId::End,
+    ] {
+        let dim_dir = crate::world::dimension_dir_for(world_dir, dim);
+        let entities_dir = dim_dir.join("entities");
+        let Ok(entries) = std::fs::read_dir(&entities_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name_str) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !name_str.starts_with("r.") || !name_str.ends_with(".mca") {
+                continue;
+            }
+            for compressed in crate::world::anvil::AnvilRegion::read_all_payloads_from_file(&path) {
+                decode_entities_chunk_payload(
+                    &compressed,
+                    dim,
+                    registries,
+                    &mut next_eid,
+                    &mut items,
+                    &mut mobs,
+                );
+            }
+        }
+    }
+
+    if items.is_empty() {
+        items = load_dropped_items_from_dir(world_dir);
+    }
+    (items, mobs)
+}
+
+fn decode_entities_chunk_payload(
+    compressed: &[u8],
+    dim: DimensionId,
+    registries: &crate::registries::Version26_3Registries,
+    next_eid: &mut i32,
+    items: &mut Vec<DroppedItemEntity>,
+    mobs: &mut Vec<MobEntity>,
+) {
+    use flate2::read::ZlibDecoder;
+    use rad_core::nbt::{NbtTag, decode_named_nbt};
+    use std::io::Read;
+
+    let mut dec = ZlibDecoder::new(compressed).take(1024 * 1024);
+    let mut raw = Vec::new();
+    if dec.read_to_end(&mut raw).is_err() {
+        return;
+    }
+    let mut cursor = raw.as_slice();
+    let Ok((_, NbtTag::Compound(root))) = decode_named_nbt(&mut cursor) else {
+        return;
+    };
+    let Some(NbtTag::List(entity_list)) = root.get("Entities") else {
+        return;
+    };
+    for ent in entity_list {
+        let NbtTag::Compound(map) = ent else {
+            continue;
+        };
+        let Some(NbtTag::String(ent_id)) = map.get("id") else {
+            continue;
+        };
+        let Some(NbtTag::List(pos)) = map.get("Pos") else {
+            continue;
+        };
+        if pos.len() != 3 {
+            continue;
+        }
+        let (NbtTag::Double(x), NbtTag::Double(y), NbtTag::Double(z)) = (&pos[0], &pos[1], &pos[2])
+        else {
+            continue;
+        };
+        let (vx, vy, vz) = match map.get("Motion") {
+            Some(NbtTag::List(m)) if m.len() == 3 => match (&m[0], &m[1], &m[2]) {
+                (NbtTag::Double(vx), NbtTag::Double(vy), NbtTag::Double(vz)) => (*vx, *vy, *vz),
+                _ => (0.0, 0.0, 0.0),
+            },
+            _ => (0.0, 0.0, 0.0),
+        };
+
+        if ent_id == "minecraft:item" {
+            let pickup_delay_ticks = match map.get("PickupDelay") {
+                Some(NbtTag::Short(v)) => (*v).max(0) as u16,
+                _ => 0,
+            };
+            let age_ticks = match map.get("Age") {
+                Some(NbtTag::Short(v)) => (*v).max(0) as u16,
+                _ => 0,
+            };
+            let Some(NbtTag::Compound(item_map)) = map.get("Item") else {
+                continue;
+            };
+            let Some(NbtTag::String(item_name)) = item_map.get("id") else {
+                continue;
+            };
+            let Some(item_id) = registries.item_by_name(item_name) else {
+                continue;
+            };
+            let count = match item_map.get("count").or_else(|| item_map.get("Count")) {
+                Some(NbtTag::Int(c)) => *c,
+                Some(NbtTag::Byte(c)) => i32::from(*c),
+                _ => 1,
+            };
+            let components = crate::net::decode_item_components_nbt(item_map);
+            let eid = *next_eid;
+            *next_eid += 1;
+            items.push(DroppedItemEntity {
+                entity_id: eid,
+                uuid: Uuid::new_v3(&Uuid::NAMESPACE_OID, &eid.to_be_bytes()),
+                dimension: dim,
+                x: *x,
+                y: *y,
+                z: *z,
+                vx,
+                vy,
+                vz,
+                stack: ItemStack {
+                    count,
+                    item_id,
+                    components,
+                },
+                pickup_delay_ticks,
+                age_ticks,
+                on_ground: false,
+            });
+        } else if let Some(kind) = MobKind::from_resource_name(ent_id) {
+            let (yaw, pitch) = match map.get("Rotation") {
+                Some(NbtTag::List(r)) if r.len() == 2 => match (&r[0], &r[1]) {
+                    (NbtTag::Float(yaw), NbtTag::Float(pitch)) => (*yaw, *pitch),
+                    _ => (0.0, 0.0),
+                },
+                _ => (0.0, 0.0),
+            };
+            let hp = match map.get("Health") {
+                Some(NbtTag::Float(v)) => (*v).max(0.1),
+                _ => kind.max_hp(),
+            };
+            let eid = *next_eid;
+            *next_eid += 1;
+            let uuid = match map.get("UUID") {
+                Some(NbtTag::IntArray(arr)) if arr.len() == 4 => {
+                    let mut bytes = [0u8; 16];
+                    for (idx, word) in arr.iter().enumerate() {
+                        bytes[idx * 4..(idx + 1) * 4].copy_from_slice(&word.to_be_bytes());
+                    }
+                    Uuid::from_bytes(bytes)
+                }
+                _ => Uuid::new_v3(&Uuid::NAMESPACE_OID, &eid.to_be_bytes()),
+            };
+            mobs.push(MobEntity {
+                entity_id: eid,
+                uuid,
+                kind,
+                dimension: dim,
+                x: *x,
+                y: *y,
+                z: *z,
+                yaw,
+                pitch,
+                vx,
+                vy,
+                vz,
+                hp,
+                attack_cooldown: 0,
+                wander_ticks: 0,
+                wander_angle: 0.0,
+                flee_ticks: 0,
+            });
+        }
+    }
+}
+
+/// Persists dropped items to Vanilla Anvil `entities/*.mca` per dimension.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn write_dropped_items_to_world_mca(
+    world_dir: &std::path::Path,
+    items: &[DroppedItemEntity],
+    registries: &crate::registries::Version26_3Registries,
+) -> std::io::Result<()> {
+    write_entities_to_world_mca(world_dir, items, &[], registries)
+}
+
+/// Persists dropped items and mobs to Vanilla Anvil `entities/*.mca` per dimension
+/// and removes legacy `<world_dir>/dropped_items.json` if present.
+pub fn write_entities_to_world_mca(
+    world_dir: &std::path::Path,
+    items: &[DroppedItemEntity],
+    mobs: &[MobEntity],
+    registries: &crate::registries::Version26_3Registries,
+) -> std::io::Result<()> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use rad_core::nbt::{NbtTag, encode_named_nbt};
+    use std::collections::{BTreeMap, HashMap};
+    use std::io::Write;
+
+    let legacy = world_dir.join("dropped_items.json");
+    if legacy.exists() {
+        let _ = std::fs::remove_file(&legacy);
+    }
+    if items.is_empty() && mobs.is_empty() {
+        return Ok(());
+    }
+
+    let mut by_chunk: HashMap<(DimensionId, i32, i32), Vec<NbtTag>> = HashMap::new();
+    for item in items {
+        let Some(item_name) = registries.item_name_by_id(item.stack.item_id) else {
+            continue;
+        };
+        let mut item_tag = BTreeMap::new();
+        item_tag.insert("id".to_owned(), NbtTag::String(item_name.to_owned()));
+        item_tag.insert("count".to_owned(), NbtTag::Int(item.stack.count));
+        if let Some(comp_tag) = crate::net::encode_item_components_nbt(&item.stack.components) {
+            item_tag.insert("components".to_owned(), comp_tag);
+        }
+
+        let mut ent = BTreeMap::new();
+        ent.insert("id".to_owned(), NbtTag::String("minecraft:item".to_owned()));
+        ent.insert(
+            "Pos".to_owned(),
+            NbtTag::List(vec![
+                NbtTag::Double(item.x),
+                NbtTag::Double(item.y),
+                NbtTag::Double(item.z),
+            ]),
+        );
+        ent.insert(
+            "Motion".to_owned(),
+            NbtTag::List(vec![
+                NbtTag::Double(item.vx),
+                NbtTag::Double(item.vy),
+                NbtTag::Double(item.vz),
+            ]),
+        );
+        ent.insert(
+            "PickupDelay".to_owned(),
+            NbtTag::Short(item.pickup_delay_ticks.min(i16::MAX as u16) as i16),
+        );
+        ent.insert(
+            "Age".to_owned(),
+            NbtTag::Short(item.age_ticks.min(i16::MAX as u16) as i16),
+        );
+        ent.insert("Item".to_owned(), NbtTag::Compound(item_tag));
+        let cx = (item.x.floor() as i32).div_euclid(16);
+        let cz = (item.z.floor() as i32).div_euclid(16);
+        by_chunk
+            .entry((item.dimension, cx, cz))
+            .or_default()
+            .push(NbtTag::Compound(ent));
+    }
+
+    for mob in mobs {
+        if mob.hp <= 0.0 {
+            continue;
+        }
+        let b = mob.uuid.as_bytes();
+        let uuid_ints = vec![
+            i32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+            i32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+            i32::from_be_bytes([b[8], b[9], b[10], b[11]]),
+            i32::from_be_bytes([b[12], b[13], b[14], b[15]]),
+        ];
+        let mut ent = BTreeMap::new();
+        ent.insert(
+            "id".to_owned(),
+            NbtTag::String(mob.kind.resource_name().to_owned()),
+        );
+        ent.insert("UUID".to_owned(), NbtTag::IntArray(uuid_ints));
+        ent.insert(
+            "Pos".to_owned(),
+            NbtTag::List(vec![
+                NbtTag::Double(mob.x),
+                NbtTag::Double(mob.y),
+                NbtTag::Double(mob.z),
+            ]),
+        );
+        ent.insert(
+            "Motion".to_owned(),
+            NbtTag::List(vec![
+                NbtTag::Double(mob.vx),
+                NbtTag::Double(mob.vy),
+                NbtTag::Double(mob.vz),
+            ]),
+        );
+        ent.insert(
+            "Rotation".to_owned(),
+            NbtTag::List(vec![NbtTag::Float(mob.yaw), NbtTag::Float(mob.pitch)]),
+        );
+        ent.insert("Health".to_owned(), NbtTag::Float(mob.hp));
+        let cx = (mob.x.floor() as i32).div_euclid(16);
+        let cz = (mob.z.floor() as i32).div_euclid(16);
+        by_chunk
+            .entry((mob.dimension, cx, cz))
+            .or_default()
+            .push(NbtTag::Compound(ent));
+    }
+
+    for ((dim, cx, cz), nbt_entities) in by_chunk {
+        let mut root = BTreeMap::new();
+        root.insert("DataVersion".to_owned(), NbtTag::Int(4790));
+        root.insert("Position".to_owned(), NbtTag::IntArray(vec![cx, cz]));
+        root.insert("Entities".to_owned(), NbtTag::List(nbt_entities));
+
+        let mut nbt_bytes = bytes::BytesMut::new();
+        encode_named_nbt("", &NbtTag::Compound(root), &mut nbt_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(&nbt_bytes)?;
+        let zlib = enc.finish()?;
+
+        let dim_dir = crate::world::dimension_dir_for(world_dir, dim);
+        crate::world::anvil::AnvilRegion::write_subdir_chunk_payload(
+            &dim_dir, "entities", cx, cz, &zlib,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1448,5 +1923,99 @@ mod tests {
             separate.stack.components.custom_name.as_deref(),
             Some("Special Plank")
         );
+    }
+
+    #[test]
+    fn dropped_items_vanilla_entities_mca_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "rad-entities-mca-{}-{}",
+            std::process::id(),
+            crate::net::unique_tmp_suffix()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let provider: std::sync::Arc<dyn rad_core::registry_provider::RegistryProvider> =
+            std::sync::Arc::new(crate::registries::synthetic_26_3_test_provider());
+        let regs = crate::registries::Version26_3Registries::from_provider(provider, true)
+            .expect("synthetic registries");
+        let item_id = regs.item_by_name("minecraft:cobblestone").unwrap_or(1);
+
+        let items = vec![DroppedItemEntity {
+            entity_id: 1,
+            uuid: Uuid::from_u128(1),
+            dimension: DimensionId::Overworld,
+            x: 8.5,
+            y: 64.25,
+            z: -3.75,
+            vx: 0.05,
+            vy: 0.2,
+            vz: -0.05,
+            stack: ItemStack {
+                count: 12,
+                item_id,
+                components: Default::default(),
+            },
+            pickup_delay_ticks: 10,
+            age_ticks: 5,
+            on_ground: false,
+        }];
+
+        write_dropped_items_to_world_mca(&dir, &items, &regs).unwrap();
+        assert!(dir.join("entities").join("r.0.-1.mca").exists());
+        assert!(!dir.join("dropped_items.json").exists());
+
+        let loaded = load_dropped_items_from_world_mca(&dir, &regs);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].stack.item_id, item_id);
+        assert_eq!(loaded[0].stack.count, 12);
+        assert_eq!(loaded[0].pickup_delay_ticks, 10);
+        assert_eq!(loaded[0].age_ticks, 5);
+        assert!((loaded[0].x - 8.5).abs() < f64::EPSILON);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mobs_and_items_vanilla_entities_mca_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("rad_mobs_mca_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let provider: std::sync::Arc<dyn rad_core::registry_provider::RegistryProvider> =
+            std::sync::Arc::new(crate::registries::synthetic_26_3_test_provider());
+        let regs = crate::registries::Version26_3Registries::from_provider(provider, true).unwrap();
+
+        let mob_uuid = Uuid::new_v3(&Uuid::NAMESPACE_OID, b"pig-1");
+        let mobs = vec![MobEntity {
+            entity_id: 42,
+            uuid: mob_uuid,
+            kind: MobKind::Pig,
+            dimension: DimensionId::Overworld,
+            x: 12.25,
+            y: 64.0,
+            z: 7.5,
+            yaw: 45.0,
+            pitch: -10.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+            hp: 8.5,
+            attack_cooldown: 0,
+            wander_ticks: 0,
+            wander_angle: 0.0,
+            flee_ticks: 0,
+        }];
+
+        write_entities_to_world_mca(&dir, &[], &mobs, &regs).unwrap();
+        assert!(dir.join("entities").join("r.0.0.mca").exists());
+
+        let (loaded_items, loaded_mobs) = load_entities_from_world_mca(&dir, &regs);
+        assert!(loaded_items.is_empty());
+        assert_eq!(loaded_mobs.len(), 1);
+        assert_eq!(loaded_mobs[0].kind, MobKind::Pig);
+        assert_eq!(loaded_mobs[0].uuid, mob_uuid);
+        assert!((loaded_mobs[0].hp - 8.5).abs() < f32::EPSILON);
+        assert!((loaded_mobs[0].x - 12.25).abs() < f64::EPSILON);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

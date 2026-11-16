@@ -134,6 +134,143 @@ fn is_piston_immovable_with(state: u16, regs: &Version26_3Registries) -> bool {
     )
 }
 
+pub(crate) fn piston_partner_pos(
+    state: u16,
+    x: i32,
+    y: i32,
+    z: i32,
+    regs: &Version26_3Registries,
+) -> Option<(i32, i32, i32)> {
+    if let Some((_, extended, facing_idx)) = piston_info_with(state, regs) {
+        if !extended {
+            return None;
+        }
+        let (dx, dy, dz) = piston_facing_offset(facing_idx);
+        return Some((x + dx, y + dy, z + dz));
+    }
+    let block = regs.block_by_state(state)?;
+    if block.name == "minecraft:piston_head" {
+        let facing_idx = usize::from((state - block.min_state) / 4);
+        let (dx, dy, dz) = piston_facing_offset(facing_idx);
+        return Some((x - dx, y - dy, z - dz));
+    }
+    None
+}
+
+fn is_piston_replaceable_with(state: u16, regs: &Version26_3Registries) -> bool {
+    if state == 0 || regs.is_fluid_state(state) {
+        return true;
+    }
+    matches!(
+        regs.block_by_state(state).map(|b| b.name).as_deref(),
+        Some(
+            "minecraft:short_grass"
+                | "minecraft:tall_grass"
+                | "minecraft:fern"
+                | "minecraft:large_fern"
+                | "minecraft:dead_bush"
+                | "minecraft:snow"
+                | "minecraft:fire"
+                | "minecraft:soul_fire"
+        )
+    )
+}
+
+fn is_solid_conductor_with(state: u16, regs: &Version26_3Registries) -> bool {
+    state != 0
+        && !regs.is_air_state(state)
+        && !regs.is_fluid_state(state)
+        && !is_redstone_wire_with(state, regs)
+        && piston_info_with(state, regs).is_none()
+        && !is_power_source_with(state, regs)
+        && repeater_info_with(state, regs).is_none()
+}
+
+pub(super) fn is_block_strongly_powered_at(
+    world: &mut WorldState,
+    dim: DimensionId,
+    bx: i32,
+    by: i32,
+    bz: i32,
+    regs: &Version26_3Registries,
+) -> bool {
+    let blk = world.get_block_in(dim, bx, by, bz);
+    if !is_solid_conductor_with(blk, regs) {
+        return false;
+    }
+    if by < 319
+        && RedstoneWireState::from_state_id_with(world.get_block_in(dim, bx, by + 1, bz), regs)
+            .is_some_and(|w| w.power > 0)
+    {
+        return true;
+    }
+    for (ox, oy, oz) in [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ] {
+        let ny = by + oy;
+        if !(MIN_WORLD_Y..=319).contains(&ny) {
+            continue;
+        }
+        let ns = world.get_block_in(dim, bx + ox, ny, bz + oz);
+        if powers_neighbor_with(ns, -ox, -oy, -oz, regs) {
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn is_piston_powered_at(
+    world: &mut WorldState,
+    dim: DimensionId,
+    x: i32,
+    y: i32,
+    z: i32,
+    dx: i32,
+    dy: i32,
+    dz: i32,
+    regs: &Version26_3Registries,
+) -> bool {
+    let check_pos = |world: &mut WorldState, px: i32, py: i32, pz: i32, is_above: bool| -> bool {
+        for (ox, oy, oz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            if !is_above && (ox, oy, oz) == (dx, dy, dz) {
+                continue;
+            }
+            if is_above && (ox, oy, oz) == (0, -1, 0) {
+                continue;
+            }
+            let ny = py + oy;
+            if !(MIN_WORLD_Y..=319).contains(&ny) {
+                continue;
+            }
+            let nx = px + ox;
+            let nz = pz + oz;
+            let ns = world.get_block_in(dim, nx, ny, nz);
+            if powers_neighbor_with(ns, -ox, -oy, -oz, regs)
+                || RedstoneWireState::from_state_id_with(ns, regs).is_some_and(|w| w.power > 0)
+                || (!is_above && is_block_strongly_powered_at(world, dim, nx, ny, nz, regs))
+            {
+                return true;
+            }
+        }
+        false
+    };
+
+    check_pos(world, x, y, z, false) || (y < 319 && check_pos(world, x, y + 1, z, true))
+}
+
 /// Computes the oriented block state ID using `regs` when a player places `raw_state`.
 pub(crate) fn orient_block_on_place_with(
     raw_state: u16,
@@ -212,8 +349,44 @@ pub(crate) fn orient_block_on_place_with(
                     return wb.min_state + wall_facing * 2; // lit=true (+0)
                 }
             }
+            "minecraft:copper_torch" => {
+                if let Some(wb) = regs.block_by_name("minecraft:copper_wall_torch") {
+                    return wb.min_state + wall_facing;
+                }
+            }
             _ => {}
         }
+    }
+
+    if name.ends_with("_slab") && block.max_state - block.min_state == 5 {
+        let top = face == 0 || (face >= 2 && cursor_y > 0.5);
+        // type(top=0, bottom=1, double=2), waterlogged(true=0, false=1)
+        return min + if top { 1 } else { 3 };
+    }
+    if block.max_state - block.min_state == 2
+        && (name.ends_with("_log")
+            || name.ends_with("_wood")
+            || name.ends_with("_stem")
+            || name.ends_with("_hyphae")
+            || matches!(
+                name,
+                "minecraft:hay_block"
+                    | "minecraft:basalt"
+                    | "minecraft:polished_basalt"
+                    | "minecraft:bone_block"
+                    | "minecraft:quartz_pillar"
+                    | "minecraft:purpur_pillar"
+                    | "minecraft:deepslate"
+                    | "minecraft:muddy_mangrove_roots"
+            ))
+    {
+        // axis: x=0, y=1, z=2
+        let axis = match face {
+            2 | 3 => 2,
+            4 | 5 => 0,
+            _ => 1,
+        };
+        return min + axis;
     }
 
     if name.ends_with("_stairs") {
@@ -399,13 +572,19 @@ pub(super) fn repeater_info_with(
     Some((delay, facing, locked, powered))
 }
 
-fn repeater_front_dir(facing: usize) -> (i32, i32) {
+pub(super) fn repeater_front_dir(facing: usize) -> (i32, i32) {
+    // In Minecraft blockstates, repeater `facing` is the input (back) side; output (front) is opposite.
     match facing {
-        0 => (0, -1), // north
-        1 => (0, 1),  // south
-        2 => (-1, 0), // west
-        _ => (1, 0),  // east
+        0 => (0, 1),  // facing=north -> outputs south
+        1 => (0, -1), // facing=south -> outputs north
+        2 => (1, 0),  // facing=west -> outputs east
+        _ => (-1, 0), // facing=east -> outputs west
     }
+}
+
+pub(super) fn repeater_back_dir(facing: usize) -> (i32, i32) {
+    let (fx, fz) = repeater_front_dir(facing);
+    (-fx, -fz)
 }
 
 pub(super) fn powers_neighbor_with(
@@ -580,25 +759,7 @@ impl WorldSim {
             return Vec::new();
         };
         let (dx, dy, dz) = piston_facing_offset(facing_idx);
-        let powered = [
-            (1, 0, 0),
-            (-1, 0, 0),
-            (0, 1, 0),
-            (0, -1, 0),
-            (0, 0, 1),
-            (0, 0, -1),
-        ]
-        .into_iter()
-        .filter(|&(ox, oy, oz)| (ox, oy, oz) != (dx, dy, dz))
-        .any(|(ox, oy, oz)| {
-            let ny = y + oy;
-            if ny < MIN_WORLD_Y {
-                return false;
-            }
-            let ns = world.get_block_in(dim, x + ox, ny, z + oz);
-            is_power_source_with(ns, &regs)
-                || RedstoneWireState::from_state_id_with(ns, &regs).is_some_and(|w| w.power > 0)
-        });
+        let powered = is_piston_powered_at(world, dim, x, y, z, dx, dy, dz, &regs);
 
         let mut updates = Vec::new();
         if powered && !extended {
@@ -607,11 +768,11 @@ impl WorldSim {
                 let cx = x + dx * step;
                 let cy = y + dy * step;
                 let cz = z + dz * step;
-                if cy < MIN_WORLD_Y {
+                if !(MIN_WORLD_Y..=319).contains(&cy) {
                     return Vec::new();
                 }
                 let cs = world.get_block_in(dim, cx, cy, cz);
-                if cs == 0 {
+                if is_piston_replaceable_with(cs, &regs) {
                     break;
                 }
                 if is_piston_immovable_with(cs, &regs) || chain.len() >= 12 {
@@ -635,7 +796,8 @@ impl WorldSim {
             let hx = x + dx;
             let hy = y + dy;
             let hz = z + dz;
-            if world.set_block_in(dim, hx, hy, hz, head_state) {
+            if (MIN_WORLD_Y..=319).contains(&hy) && world.set_block_in(dim, hx, hy, hz, head_state)
+            {
                 updates.push((hx, hy, hz, head_state));
             }
             let ext_state = cur - 6;
@@ -646,7 +808,7 @@ impl WorldSim {
             let hx = x + dx;
             let hy = y + dy;
             let hz = z + dz;
-            if hy >= MIN_WORLD_Y
+            if (MIN_WORLD_Y..=319).contains(&hy)
                 && regs
                     .block_by_state(world.get_block_in(dim, hx, hy, hz))
                     .is_some_and(|b| b.name == "minecraft:piston_head")
@@ -662,9 +824,9 @@ impl WorldSim {
                 let px = x + dx * 2;
                 let py = y + dy * 2;
                 let pz = z + dz * 2;
-                if py >= MIN_WORLD_Y {
+                if (MIN_WORLD_Y..=319).contains(&py) {
                     let pull_state = world.get_block_in(dim, px, py, pz);
-                    if pull_state != 0
+                    if !is_piston_replaceable_with(pull_state, &regs)
                         && !is_piston_immovable_with(pull_state, &regs)
                         && world.set_block_in(dim, px, py, pz, 0)
                         && world.set_block_in(dim, hx, hy, hz, pull_state)
@@ -675,6 +837,35 @@ impl WorldSim {
                 }
             }
         }
+        let tick = self.last_tick;
+        for &(ux, uy, uz, _) in &updates {
+            self.on_block_changed_in(world, dim, ux, uy, uz, tick);
+        }
+        // Propagate power if a piston moved a redstone block or wire.
+        let mut extra_updates = Vec::new();
+        for &(ux, uy, uz, ustate) in &updates {
+            if is_power_source_with(ustate, &regs) || is_redstone_wire_with(ustate, &regs) {
+                for (ox, oy, oz) in [
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ] {
+                    let ny = uy + oy;
+                    if (MIN_WORLD_Y..=319).contains(&ny) {
+                        let nb = world.get_block_in(dim, ux + ox, ny, uz + oz);
+                        if is_redstone_wire_with(nb, &regs) {
+                            extra_updates
+                                .extend(self.update_redstone_around_in(world, dim, ux, uy, uz));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        updates.extend(extra_updates);
         updates
     }
 
@@ -884,13 +1075,10 @@ impl WorldSim {
                 (0, 1, 0),
                 (0, -1, 0),
             ] {
-                if powers_neighbor_with(
-                    world.get_block_in(dim, wx + dx, wy + dy, wz + dz),
-                    -dx,
-                    -dy,
-                    -dz,
-                    &regs,
-                ) {
+                let nb = world.get_block_in(dim, wx + dx, wy + dy, wz + dz);
+                if powers_neighbor_with(nb, -dx, -dy, -dz, &regs)
+                    || is_block_strongly_powered_at(world, dim, wx + dx, wy + dy, wz + dz, &regs)
+                {
                     max_src = 15;
                     break;
                 }
@@ -1016,20 +1204,20 @@ impl WorldSim {
             }
         }
 
-        for (dx, dy, dz) in [
-            (0, 0, 0),
-            (1, 0, 0),
-            (-1, 0, 0),
-            (0, 1, 0),
-            (0, -1, 0),
-            (0, 0, 1),
-            (0, 0, -1),
-        ] {
-            let py = y + dy;
-            if py >= MIN_WORLD_Y
-                && piston_info_with(world.get_block_in(dim, x + dx, py, z + dz), &regs).is_some()
-            {
-                updates.extend(self.update_piston_at_in(world, dim, x + dx, py, z + dz));
+        for dx in -2_i32..=2 {
+            for dy in -2_i32..=2 {
+                for dz in -2_i32..=2 {
+                    if dx.abs() + dy.abs() + dz.abs() > 2 {
+                        continue;
+                    }
+                    let py = y + dy;
+                    if (MIN_WORLD_Y..=319).contains(&py)
+                        && piston_info_with(world.get_block_in(dim, x + dx, py, z + dz), &regs)
+                            .is_some()
+                    {
+                        updates.extend(self.update_piston_at_in(world, dim, x + dx, py, z + dz));
+                    }
+                }
             }
         }
 
@@ -1060,11 +1248,12 @@ impl WorldSim {
         z: i32,
     ) -> Option<u16> {
         let regs = std::sync::Arc::clone(world.registries());
+        let repeater = regs.block_by_name("minecraft:repeater")?;
         let state = world.get_block_in(dim, x, y, z);
         let (delay, _, _, _) = repeater_info_with(state, &regs)?;
-        let rel = state - 8704;
+        let rel = state - repeater.min_state;
         let next_delay_idx = u16::from(delay % 4);
-        let next = 8704 + next_delay_idx * 16 + (rel % 16);
+        let next = repeater.min_state + next_delay_idx * 16 + (rel % 16);
         if world.set_block_in(dim, x, y, z, next) {
             self.push(ScheduledEntry {
                 due_tick: self.last_tick.saturating_add(u64::from(delay % 4 + 1) * 2),
@@ -1089,11 +1278,13 @@ impl WorldSim {
         y: i32,
         z: i32,
     ) -> Option<u16> {
+        let regs = std::sync::Arc::clone(world.registries());
+        let comp = regs.block_by_name("minecraft:comparator")?;
         let state = world.get_block_in(dim, x, y, z);
-        if !(13030..=13045).contains(&state) {
+        if !(comp.min_state..=comp.max_state).contains(&state) {
             return None;
         }
-        let next = 13030 + ((state - 13030) ^ 2);
+        let next = comp.min_state + ((state - comp.min_state) ^ 2);
         if world.set_block_in(dim, x, y, z, next) {
             Some(next)
         } else {
@@ -1159,5 +1350,206 @@ impl WorldSim {
         radius: i32,
     ) -> Vec<(i32, i32, i32, u16)> {
         Self::detonate_tnt_in(world, DimensionId::Overworld, x, y, z, radius)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registries::{Version26_3Registries, synthetic_26_3_test_provider};
+    use crate::world::WorldState;
+    use rad_core::registry_provider::{
+        BlockRegistryEntry, RegistryProvider, RegistryProviderError, RegistryTagSet, TagDefinition,
+        VersionMetadata,
+    };
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct RedstoneTestProvider {
+        blocks: Vec<BlockRegistryEntry>,
+    }
+
+    impl RedstoneTestProvider {
+        fn new() -> Self {
+            let base = synthetic_26_3_test_provider();
+            let mut blocks = Vec::new();
+            let mut next_state = 0u16;
+            let extra = [
+                ("minecraft:stone", 1u16),
+                ("minecraft:redstone_block", 1),
+                ("minecraft:repeater", 64),
+                ("minecraft:piston", 12),
+                ("minecraft:piston_head", 24),
+                ("minecraft:sticky_piston", 12),
+            ];
+            let mut idx = 0u16;
+            while let Some(entry) = base.block_by_state(idx) {
+                let count = if entry.name == "minecraft:redstone_wire" {
+                    1296
+                } else {
+                    entry.max_state - entry.min_state + 1
+                };
+                let min_state = next_state;
+                let max_state = min_state + count - 1;
+                blocks.push(BlockRegistryEntry {
+                    block_id: blocks.len() as u16,
+                    name: entry.name.clone(),
+                    default_state: min_state,
+                    min_state,
+                    max_state,
+                });
+                next_state = max_state + 1;
+                idx = entry.max_state + 1;
+            }
+            for (name, count) in extra {
+                let min_state = next_state;
+                let max_state = min_state + count - 1;
+                blocks.push(BlockRegistryEntry {
+                    block_id: blocks.len() as u16,
+                    name: name.to_string(),
+                    default_state: min_state,
+                    min_state,
+                    max_state,
+                });
+                next_state = max_state + 1;
+            }
+            Self { blocks }
+        }
+    }
+
+    impl RegistryProvider for RedstoneTestProvider {
+        fn metadata(&self) -> VersionMetadata {
+            synthetic_26_3_test_provider().metadata()
+        }
+
+        fn block_by_name(&self, name: &str) -> Option<BlockRegistryEntry> {
+            self.blocks.iter().find(|b| b.name == name).cloned()
+        }
+
+        fn block_by_state(&self, state: u16) -> Option<BlockRegistryEntry> {
+            self.blocks
+                .iter()
+                .find(|b| state >= b.min_state && state <= b.max_state)
+                .cloned()
+        }
+
+        fn item_by_name(&self, name: &str) -> Option<i32> {
+            synthetic_26_3_test_provider().item_by_name(name)
+        }
+
+        fn item_name_by_id(&self, _id: i32) -> Option<&str> {
+            None
+        }
+
+        fn entity_by_name(&self, name: &str) -> Option<i32> {
+            synthetic_26_3_test_provider().entity_by_name(name)
+        }
+
+        fn menu_by_name(&self, name: &str) -> Option<i32> {
+            synthetic_26_3_test_provider().menu_by_name(name)
+        }
+
+        fn block_tags(&self) -> Result<Vec<TagDefinition>, RegistryProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn item_tags(&self) -> Result<Vec<TagDefinition>, RegistryProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn core_registry_tags(&self) -> Result<Vec<RegistryTagSet>, RegistryProviderError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn repeater_directions_match_vanilla_facing() {
+        // facing=north (0): input at north (0, -1), output to south (0, 1)
+        assert_eq!(repeater_back_dir(0), (0, -1));
+        assert_eq!(repeater_front_dir(0), (0, 1));
+        // facing=south (1): input at south (0, 1), output to north (0, -1)
+        assert_eq!(repeater_back_dir(1), (0, 1));
+        assert_eq!(repeater_front_dir(1), (0, -1));
+        // facing=west (2): input at west (-1, 0), output to east (1, 0)
+        assert_eq!(repeater_back_dir(2), (-1, 0));
+        assert_eq!(repeater_front_dir(2), (1, 0));
+        // facing=east (3): input at east (1, 0), output to west (-1, 0)
+        assert_eq!(repeater_back_dir(3), (1, 0));
+        assert_eq!(repeater_front_dir(3), (-1, 0));
+    }
+
+    #[test]
+    fn repeater_powers_forward_wire_and_extends_piston() {
+        let regs = Arc::new(
+            Version26_3Registries::from_provider(Arc::new(RedstoneTestProvider::new()), true)
+                .expect("redstone test registries"),
+        );
+        let mut world = WorldState::new_with_registries(None, Arc::clone(&regs));
+        let mut sim = WorldSim::default();
+
+        let stone = regs.block_by_name("minecraft:stone").unwrap().default_state;
+        let redstone_block = regs
+            .block_by_name("minecraft:redstone_block")
+            .unwrap()
+            .default_state;
+        let wire_unpowered = RedstoneWireState {
+            east: WireConnection::None,
+            north: WireConnection::None,
+            power: 0,
+            south: WireConnection::None,
+            west: WireConnection::None,
+        }
+        .to_state_id_with(&regs);
+        let rep_min = regs.block_by_name("minecraft:repeater").unwrap().min_state;
+        // facing=west (2) -> input from west (-1, 0), outputs east (+1, 0).
+        // delay=1 (0), facing=west (2*4=8), locked=false (2), powered=false (1) => offset 11.
+        let repeater_west_unpowered = rep_min + 11;
+        let piston_min = regs.block_by_name("minecraft:piston").unwrap().min_state;
+        // piston: extended=false (6), facing=east (1) => min + 7
+        let piston_east = piston_min + 7;
+
+        for x in 0..=8 {
+            assert!(world.set_block(x, 63, 0, stone));
+        }
+        assert!(world.set_block(1, 64, 0, redstone_block));
+        assert!(world.set_block(2, 64, 0, wire_unpowered));
+        assert!(world.set_block(3, 64, 0, repeater_west_unpowered));
+        assert!(world.set_block(4, 64, 0, wire_unpowered));
+        assert!(world.set_block(5, 64, 0, piston_east));
+
+        sim.update_redstone_around_in(&mut world, DimensionId::Overworld, 1, 64, 0);
+        sim.on_block_changed(&mut world, 3, 64, 0, 0);
+        for tick in 1..=6 {
+            sim.step(&mut world, tick);
+        }
+
+        // Repeater should now be powered (even offset, powered=true=0)
+        let rep_state = world.get_block(3, 64, 0);
+        assert_eq!((rep_state - rep_min) % 2, 0, "repeater should be powered");
+
+        // Wire in front of repeater (at x=4) should be powered at 15
+        let front_wire = RedstoneWireState::from_state_id_with(world.get_block(4, 64, 0), &regs)
+            .expect("front block should be redstone wire");
+        assert_eq!(front_wire.power, 15);
+
+        // Piston at x=5 should be extended (extended=true => offset < 6) and head at x=6
+        let piston_state = world.get_block(5, 64, 0);
+        assert!(
+            piston_state - piston_min < 6,
+            "piston should be extended, got state {piston_state}"
+        );
+        let head_min = regs
+            .block_by_name("minecraft:piston_head")
+            .unwrap()
+            .min_state;
+        let head_max = regs
+            .block_by_name("minecraft:piston_head")
+            .unwrap()
+            .max_state;
+        let head_state = world.get_block(6, 64, 0);
+        assert!(
+            head_state >= head_min && head_state <= head_max,
+            "piston head should be placed at x=6"
+        );
     }
 }

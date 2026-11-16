@@ -189,6 +189,7 @@ autosave_interval_secs = 1
     }
 
     let mut child = Command::new(bin)
+        .arg("--nogui")
         .current_dir(dir)
         .env("RUST_LOG", rust_log)
         .stdin(Stdio::piped())
@@ -749,6 +750,7 @@ async fn headless_startup_works_under_warn_logging_and_bounded_failure() {
     .unwrap();
     let bin = env!("CARGO_BIN_EXE_rad-server");
     let mut bad_child = Command::new(bin)
+        .arg("--nogui")
         .current_dir(&bad_dir)
         .env("RUST_LOG", "error")
         .stdout(Stdio::null())
@@ -828,6 +830,13 @@ fn spawn_bin_and_wait_tcp(bin: &Path, dir: &Path, port: u16, label: &str) -> Ser
         stage_version_package(dir);
     }
     let mut child = Command::new(bin)
+        .args(
+            if bin.file_stem().and_then(|s| s.to_str()) == Some("rad-server") {
+                vec!["--nogui"]
+            } else {
+                vec![]
+            },
+        )
         .current_dir(dir)
         .env("RUST_LOG", "warn")
         .stdin(Stdio::piped())
@@ -1782,6 +1791,7 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
 
     // 1. Missing versions/26.3 must fail BEFORE opening TCP port
     let missing_out = Command::new(&server_bin)
+        .arg("--nogui")
         .current_dir(&other_cwd)
         .arg("--config")
         .arg(install_dir.join("rad.properties"))
@@ -1799,6 +1809,7 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
     let orig_items = std::fs::read(&items_path).unwrap();
     std::fs::write(&items_path, b"{\"entries\":[]}").unwrap();
     let corrupt_out = Command::new(&server_bin)
+        .arg("--nogui")
         .current_dir(&other_cwd)
         .arg("--config")
         .arg(install_dir.join("rad.properties"))
@@ -1818,6 +1829,7 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
     let orig_lib = std::fs::read(&lib_path).unwrap();
     std::fs::write(&lib_path, b"not-a-valid-dll").unwrap();
     let corrupt_lib_out = Command::new(&server_bin)
+        .arg("--nogui")
         .current_dir(&other_cwd)
         .arg("--config")
         .arg(install_dir.join("rad.properties"))
@@ -1834,6 +1846,7 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
     let version_toml_path = install_dir.join("versions/version.toml");
     std::fs::write(&version_toml_path, "version = \"26.4\"\n").unwrap();
     let missing_selected_out = Command::new(&server_bin)
+        .arg("--nogui")
         .current_dir(&other_cwd)
         .arg("--config")
         .arg(install_dir.join("rad.properties"))
@@ -1885,6 +1898,7 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
     // 4. Launch from a DIFFERENT working directory (--config <install_dir>/rad.properties)
     // and verify Status + Login + Configuration + Play + clean stop!
     let mut child = Command::new(&server_bin)
+        .arg("--nogui")
         .current_dir(&other_cwd)
         .arg("--config")
         .arg(install_dir.join("rad.properties"))
@@ -2004,6 +2018,7 @@ fn headless_refuses_missing_version_package_without_opening_port() {
     std::fs::write(root.join("whitelist.json"), "[]").unwrap();
 
     let out = Command::new(&server_bin)
+        .arg("--nogui")
         .current_dir(&root)
         .arg("--config")
         .arg(root.join("rad.properties"))

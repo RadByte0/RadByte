@@ -2,6 +2,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(windows)]
+mod gui_windows;
 mod version_selection;
 
 use std::path::{Path, PathBuf};
@@ -36,6 +38,16 @@ fn cstr_bytes_to_str(buf: &[u8]) -> &str {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if !std::env::args_os().skip(1).any(|arg| arg == "--nogui") {
+        match gui_windows::run() {
+            Ok(code) => std::process::exit(code),
+            Err(err) => {
+                eprintln!("RadServer GUI error: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

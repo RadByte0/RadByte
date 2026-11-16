@@ -7,12 +7,13 @@ pub use furnace::FurnaceEntity;
 pub use furnace::FurnaceStore;
 pub use redstone::{RedstoneWireState, WireConnection};
 use redstone::{
-    button_is_powered_with, button_toggle_state_with, powers_neighbor_with, repeater_info_with,
+    button_is_powered_with, button_toggle_state_with, is_block_strongly_powered_at,
+    powers_neighbor_with, repeater_back_dir, repeater_front_dir, repeater_info_with,
     wall_torch_support_offset_and_item_with,
 };
 pub(crate) use redstone::{
     floor_dependent_item_with, is_redstone_wire_with, orient_block_on_place_with,
-    supports_redstone_with,
+    piston_partner_pos, supports_redstone_with,
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -40,7 +41,69 @@ fn is_fall_through(state: u16, regs: &Version26_3Registries) -> bool {
     regs.is_air_state(state) || regs.is_fluid_state(state)
 }
 
-const MAX_FLUID_SPREAD_DEPTH: u8 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FluidKind {
+    Water,
+    Lava,
+}
+
+impl FluidKind {
+    const fn tick_delay(self, dim: DimensionId) -> u64 {
+        match (self, dim) {
+            (Self::Water, _) => 5,
+            (Self::Lava, DimensionId::Nether) => 10,
+            (Self::Lava, _) => 30,
+        }
+    }
+
+    const fn level_step(self, dim: DimensionId) -> u8 {
+        match (self, dim) {
+            (Self::Water, _) | (Self::Lava, DimensionId::Nether) => 1,
+            (Self::Lava, _) => 2,
+        }
+    }
+
+    const fn max_flow_level(self, dim: DimensionId) -> u8 {
+        match (self, dim) {
+            (Self::Water, _) | (Self::Lava, DimensionId::Nether) => 7,
+            (Self::Lava, _) => 6,
+        }
+    }
+
+    fn state_range(self, regs: &Version26_3Registries) -> Option<(u16, u16)> {
+        match self {
+            Self::Water => Some((regs.blocks.water.min_state, regs.blocks.water.max_state)),
+            Self::Lava => regs
+                .blocks
+                .lava
+                .as_ref()
+                .map(|b| (b.min_state, b.max_state)),
+        }
+    }
+
+    fn state_for_level(self, level: u8, regs: &Version26_3Registries) -> Option<u16> {
+        let (min, max) = self.state_range(regs)?;
+        let st = min.saturating_add(u16::from(level));
+        Some(st.min(max))
+    }
+}
+
+fn classify_fluid(state: u16, regs: &Version26_3Registries) -> Option<(FluidKind, u8)> {
+    if state >= regs.blocks.water.min_state && state <= regs.blocks.water.max_state {
+        return Some((
+            FluidKind::Water,
+            (state - regs.blocks.water.min_state).min(15) as u8,
+        ));
+    }
+    if let Some(lava) = regs.blocks.lava.as_ref()
+        && state >= lava.min_state
+        && state <= lava.max_state
+    {
+        return Some((FluidKind::Lava, (state - lava.min_state).min(15) as u8));
+    }
+    None
+}
+
 const MAX_SCHEDULED_PER_TICK: usize = 256;
 const MAX_SCANNED_PER_TICK: usize = 4096;
 const MAX_PENDING_SIM_TASKS: usize = 65_536;
@@ -155,7 +218,7 @@ impl SimulationArea {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum SimAction {
+pub(crate) enum SimAction {
     GravityFall,
     FluidSpread { depth: u8 },
     CropGrow,
@@ -179,6 +242,40 @@ impl SimAction {
             Self::WallSupportCheck => 6,
             Self::ButtonRelease => 7,
             Self::RepeaterTick => 8,
+        }
+    }
+
+    pub(crate) fn encode_tag(self) -> String {
+        match self {
+            Self::GravityFall => "gravity_fall".to_owned(),
+            Self::FluidSpread { depth } => format!("fluid_spread:{depth}"),
+            Self::CropGrow => "crop_grow".to_owned(),
+            Self::FireExtinguish => "fire_extinguish".to_owned(),
+            Self::WireSupportCheck => "wire_support_check".to_owned(),
+            Self::FloorSupportCheck => "floor_support_check".to_owned(),
+            Self::WallSupportCheck => "wall_support_check".to_owned(),
+            Self::ButtonRelease => "button_release".to_owned(),
+            Self::RepeaterTick => "repeater_tick".to_owned(),
+        }
+    }
+
+    pub(crate) fn decode_tag(tag: &str) -> Option<Self> {
+        if let Some(rest) = tag.strip_prefix("fluid_spread:") {
+            return rest
+                .parse::<u8>()
+                .ok()
+                .map(|depth| Self::FluidSpread { depth });
+        }
+        match tag {
+            "gravity_fall" => Some(Self::GravityFall),
+            "crop_grow" => Some(Self::CropGrow),
+            "fire_extinguish" => Some(Self::FireExtinguish),
+            "wire_support_check" => Some(Self::WireSupportCheck),
+            "floor_support_check" => Some(Self::FloorSupportCheck),
+            "wall_support_check" => Some(Self::WallSupportCheck),
+            "button_release" => Some(Self::ButtonRelease),
+            "repeater_tick" => Some(Self::RepeaterTick),
+            _ => None,
         }
     }
 }
@@ -297,88 +394,88 @@ impl WorldSim {
             }
             let regs = std::sync::Arc::clone(world.registries());
             let state = world.get_block_in(dim, bx, by, bz);
-            let water_source = regs.blocks.water.default_state;
             let fire_state = regs.blocks.fire.default_state;
             let wheat_min = regs.blocks.wheat.min_state;
             let wheat_max = regs.blocks.wheat.max_state;
-            match state {
-                s if is_redstone_wire_with(s, &regs) => {
-                    self.push(ScheduledEntry {
-                        due_tick: cur_tick.saturating_add(1),
-                        dim,
-                        x: bx,
-                        y: by,
-                        z: bz,
-                        action: SimAction::WireSupportCheck,
-                    });
-                }
-                s if floor_dependent_item_with(s, &regs).is_some() => {
-                    self.push(ScheduledEntry {
-                        due_tick: cur_tick.saturating_add(1),
-                        dim,
-                        x: bx,
-                        y: by,
-                        z: bz,
-                        action: SimAction::FloorSupportCheck,
-                    });
-                }
-                s if wall_torch_support_offset_and_item_with(s, &regs).is_some() => {
-                    self.push(ScheduledEntry {
-                        due_tick: cur_tick.saturating_add(1),
-                        dim,
-                        x: bx,
-                        y: by,
-                        z: bz,
-                        action: SimAction::WallSupportCheck,
-                    });
-                }
-                s if is_gravity_block(s, &regs) => {
-                    if by > MIN_WORLD_Y
-                        && is_fall_through(world.get_block_in(dim, bx, by - 1, bz), &regs)
-                    {
+            if let Some((fluid, level)) = classify_fluid(state, &regs) {
+                self.push(ScheduledEntry {
+                    due_tick: cur_tick.saturating_add(fluid.tick_delay(dim)),
+                    dim,
+                    x: bx,
+                    y: by,
+                    z: bz,
+                    action: SimAction::FluidSpread { depth: level },
+                });
+            } else {
+                match state {
+                    s if is_redstone_wire_with(s, &regs) => {
                         self.push(ScheduledEntry {
-                            due_tick: cur_tick + 2,
+                            due_tick: cur_tick.saturating_add(1),
                             dim,
                             x: bx,
                             y: by,
                             z: bz,
-                            action: SimAction::GravityFall,
+                            action: SimAction::WireSupportCheck,
                         });
                     }
-                }
-                s if s == water_source => {
-                    self.push(ScheduledEntry {
-                        due_tick: cur_tick + 4,
-                        dim,
-                        x: bx,
-                        y: by,
-                        z: bz,
-                        action: SimAction::FluidSpread { depth: 0 },
-                    });
-                }
-                s if s == fire_state => {
-                    if by > MIN_WORLD_Y && world.get_block_in(dim, bx, by - 1, bz) == 0 {
+                    s if floor_dependent_item_with(s, &regs).is_some() => {
                         self.push(ScheduledEntry {
-                            due_tick: cur_tick + 3,
+                            due_tick: cur_tick.saturating_add(1),
                             dim,
                             x: bx,
                             y: by,
                             z: bz,
-                            action: SimAction::FireExtinguish,
+                            action: SimAction::FloorSupportCheck,
                         });
                     }
+                    s if wall_torch_support_offset_and_item_with(s, &regs).is_some() => {
+                        self.push(ScheduledEntry {
+                            due_tick: cur_tick.saturating_add(1),
+                            dim,
+                            x: bx,
+                            y: by,
+                            z: bz,
+                            action: SimAction::WallSupportCheck,
+                        });
+                    }
+                    s if is_gravity_block(s, &regs) => {
+                        if by > MIN_WORLD_Y
+                            && is_fall_through(world.get_block_in(dim, bx, by - 1, bz), &regs)
+                        {
+                            self.push(ScheduledEntry {
+                                due_tick: cur_tick + 2,
+                                dim,
+                                x: bx,
+                                y: by,
+                                z: bz,
+                                action: SimAction::GravityFall,
+                            });
+                        }
+                    }
+                    s if s == fire_state => {
+                        if by > MIN_WORLD_Y && world.get_block_in(dim, bx, by - 1, bz) == 0 {
+                            self.push(ScheduledEntry {
+                                due_tick: cur_tick + 3,
+                                dim,
+                                x: bx,
+                                y: by,
+                                z: bz,
+                                action: SimAction::FireExtinguish,
+                            });
+                        }
+                    }
+                    s if (wheat_min..wheat_max).contains(&s) => {
+                        self.push(ScheduledEntry {
+                            due_tick: cur_tick + 20,
+                            dim,
+                            x: bx,
+                            y: by,
+                            z: bz,
+                            action: SimAction::CropGrow,
+                        });
+                    }
+                    _ => {}
                 }
-                s if (wheat_min..wheat_max).contains(&s) => {
-                    self.push(ScheduledEntry {
-                        due_tick: cur_tick + 20,
-                        dim,
-                        x: bx,
-                        y: by,
-                        z: bz,
-                        action: SimAction::CropGrow,
-                    });
-                }
-                _ => {}
             }
             if let Some((delay, _, _, _)) = repeater_info_with(state, &regs) {
                 self.push(ScheduledEntry {
@@ -552,10 +649,62 @@ impl WorldSim {
         }
     }
 
-    /// Atomically writes `world/sim_queue.json`.
+    /// Returns all pending and suspended block ticks `(dim, x, y, z, delay, action)`.
+    #[must_use]
+    pub(crate) fn all_pending_ticks(
+        &self,
+        cur_tick: u64,
+    ) -> Vec<(DimensionId, i32, i32, i32, u64, SimAction)> {
+        let mut out = Vec::new();
+        for (&due_tick, bucket) in &self.queue {
+            let delay = due_tick.saturating_sub(cur_tick);
+            for &(dim, x, y, z, action) in bucket {
+                out.push((dim, x, y, z, delay, action));
+            }
+        }
+        for (&(dim, _, _), bucket) in &self.suspended {
+            for &(x, y, z, action) in bucket {
+                out.push((dim, x, y, z, 1, action));
+            }
+        }
+        out
+    }
+
+    /// Enqueues a block tick loaded from Vanilla Anvil `block_ticks` without dirtying.
+    pub(crate) fn schedule_loaded_tick(
+        &mut self,
+        dim: DimensionId,
+        x: i32,
+        y: i32,
+        z: i32,
+        delay: u64,
+        action: SimAction,
+    ) {
+        if self.total_pending >= MAX_PENDING_SIM_TASKS {
+            return;
+        }
+        let key = (dim, x, y, z, action.kind_id());
+        if self.pending_keys.insert(key) {
+            let due_tick = self.last_tick.saturating_add(delay.max(1));
+            self.queue
+                .entry(due_tick)
+                .or_default()
+                .push_back((dim, x, y, z, action));
+            self.total_pending += 1;
+        }
+    }
+
+    /// Atomically writes `world/sim_queue.json`, or removes it when empty.
     pub fn write_snapshot_atomic(world_dir: &Path, snap: &SimSnapshot) -> std::io::Result<()> {
-        std::fs::create_dir_all(world_dir)?;
         let path = world_dir.join("sim_queue.json");
+        if snap.scheduled.is_empty() && snap.suspended.is_empty() && snap.falling_blocks.is_empty()
+        {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Ok(());
+        }
+        std::fs::create_dir_all(world_dir)?;
         let tmp = world_dir.join(format!("sim_queue.json.{}.tmp", std::process::id()));
         let json = serde_json::to_string_pretty(snap)
             .map_err(|e| std::io::Error::other(format!("sim_queue serialize failed: {e}")))?;
@@ -687,44 +836,8 @@ impl WorldSim {
                             self.on_block_changed_in(world, dim, x, y, z, cur_tick);
                         }
                     }
-                    SimAction::FluidSpread { depth } => {
-                        let regs = std::sync::Arc::clone(world.registries());
-                        let water_source = regs.blocks.water.default_state;
-                        let water_flow =
-                            (regs.blocks.water.default_state + 1).min(regs.blocks.water.max_state);
-                        let cur = world.get_block_in(dim, x, y, z);
-                        if cur != water_source && cur != water_flow {
-                            continue;
-                        }
-                        if y > MIN_WORLD_Y && world.get_block_in(dim, x, y - 1, z) == 0 {
-                            if world.set_block_in(dim, x, y - 1, z, water_flow) {
-                                updates.push((dim, x, y - 1, z, water_flow));
-                                self.push(ScheduledEntry {
-                                    due_tick: cur_tick + 4,
-                                    dim,
-                                    x,
-                                    y: y - 1,
-                                    z,
-                                    action: SimAction::FluidSpread { depth: 0 },
-                                });
-                            }
-                        } else if depth < MAX_FLUID_SPREAD_DEPTH {
-                            for (nx, nz) in [(x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)] {
-                                if world.get_block_in(dim, nx, y, nz) == 0
-                                    && world.set_block_in(dim, nx, y, nz, water_flow)
-                                {
-                                    updates.push((dim, nx, y, nz, water_flow));
-                                    self.push(ScheduledEntry {
-                                        due_tick: cur_tick + 4,
-                                        dim,
-                                        x: nx,
-                                        y,
-                                        z: nz,
-                                        action: SimAction::FluidSpread { depth: depth + 1 },
-                                    });
-                                }
-                            }
-                        }
+                    SimAction::FluidSpread { depth: _ } => {
+                        self.step_fluid_spread(world, dim, x, y, z, cur_tick, &mut updates);
                     }
                     SimAction::CropGrow => {
                         let regs = std::sync::Arc::clone(world.registries());
@@ -823,24 +936,33 @@ impl WorldSim {
                         if let Some((_delay, facing, _locked, powered)) =
                             repeater_info_with(state, &regs)
                         {
-                            let (bx, bz) = match facing {
-                                0 => (x, z + 1), // facing north -> input from south
-                                1 => (x, z - 1), // facing south -> input from north
-                                2 => (x + 1, z), // facing west -> input from east
-                                _ => (x - 1, z), // facing east -> input from west
-                            };
+                            let (bdx, bdz) = repeater_back_dir(facing);
+                            let (bx, bz) = (x + bdx, z + bdz);
                             let back = world.get_block_in(dim, bx, y, bz);
-                            let should_power = powers_neighbor_with(back, x - bx, 0, z - bz, &regs)
+                            let should_power = powers_neighbor_with(back, -bdx, 0, -bdz, &regs)
                                 || RedstoneWireState::from_state_id_with(back, &regs)
-                                    .is_some_and(|w| w.power > 0);
+                                    .is_some_and(|w| w.power > 0)
+                                || is_block_strongly_powered_at(world, dim, bx, y, bz, &regs);
                             if should_power != powered {
                                 let next = if should_power { state - 1 } else { state + 1 };
                                 if world.set_block_in(dim, x, y, z, next) {
                                     updates.push((dim, x, y, z, next));
+                                    let (fdx, fdz) = repeater_front_dir(facing);
                                     updates.extend(
                                         self.update_redstone_around_in(world, dim, x, y, z)
                                             .into_iter()
                                             .map(|(rx, ry, rz, s)| (dim, rx, ry, rz, s)),
+                                    );
+                                    updates.extend(
+                                        self.update_redstone_around_in(
+                                            world,
+                                            dim,
+                                            x + fdx,
+                                            y,
+                                            z + fdz,
+                                        )
+                                        .into_iter()
+                                        .map(|(rx, ry, rz, s)| (dim, rx, ry, rz, s)),
                                     );
                                 }
                             }
@@ -976,5 +1098,186 @@ impl WorldSim {
 
         self.falling_blocks = remaining;
         (block_updates, removed_ids)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_fluid_spread(
+        &mut self,
+        world: &mut WorldState,
+        dim: DimensionId,
+        x: i32,
+        y: i32,
+        z: i32,
+        cur_tick: u64,
+        updates: &mut Vec<(DimensionId, i32, i32, i32, u16)>,
+    ) {
+        let regs = std::sync::Arc::clone(world.registries());
+        let cur = world.get_block_in(dim, x, y, z);
+        let Some((fluid, level)) = classify_fluid(cur, &regs) else {
+            return;
+        };
+
+        let delay = fluid.tick_delay(dim);
+        let step = fluid.level_step(dim);
+        let max_level = fluid.max_flow_level(dim);
+        let horiz = [(x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)];
+
+        // Check infinite water source & flowing fluid decay.
+        if level > 0 {
+            let above_same = classify_fluid(world.get_block_in(dim, x, y + 1, z), &regs)
+                .is_some_and(|(k, _)| k == fluid);
+            let mut min_neighbor: Option<u8> = None;
+            let mut water_sources = 0u8;
+            for (nx, nz) in horiz {
+                if let Some((nk, nl)) = classify_fluid(world.get_block_in(dim, nx, y, nz), &regs)
+                    && nk == fluid
+                {
+                    if fluid == FluidKind::Water && nl == 0 {
+                        water_sources = water_sources.saturating_add(1);
+                    }
+                    let eff = if nl >= 8 { 0 } else { nl };
+                    min_neighbor = Some(min_neighbor.map_or(eff, |m| m.min(eff)));
+                }
+            }
+
+            if fluid == FluidKind::Water && water_sources >= 2 {
+                let below = world.get_block_in(dim, x, y - 1, z);
+                let below_supports_source = !regs.is_air_state(below)
+                    && classify_fluid(below, &regs)
+                        .is_none_or(|(k, l)| k == FluidKind::Water && l == 0);
+                if below_supports_source
+                    && let Some(src) = fluid.state_for_level(0, &regs)
+                    && world.set_block_in(dim, x, y, z, src)
+                {
+                    updates.push((dim, x, y, z, src));
+                    self.on_block_changed_in(world, dim, x, y, z, cur_tick);
+                    return;
+                }
+            }
+
+            let target_level = if above_same {
+                Some(8)
+            } else {
+                min_neighbor
+                    .map(|m| m.saturating_add(step))
+                    .filter(|&nl| nl <= max_level)
+            };
+
+            match target_level {
+                None => {
+                    let air = regs.blocks.air.default_state;
+                    if world.set_block_in(dim, x, y, z, air) {
+                        updates.push((dim, x, y, z, air));
+                        self.on_block_changed_in(world, dim, x, y, z, cur_tick);
+                    }
+                    return;
+                }
+                Some(nl) if nl != level => {
+                    if let Some(new_state) = fluid.state_for_level(nl, &regs)
+                        && world.set_block_in(dim, x, y, z, new_state)
+                    {
+                        updates.push((dim, x, y, z, new_state));
+                        self.push(ScheduledEntry {
+                            due_tick: cur_tick.saturating_add(delay),
+                            dim,
+                            x,
+                            y,
+                            z,
+                            action: SimAction::FluidSpread { depth: nl },
+                        });
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Flow downward.
+        if y > MIN_WORLD_Y {
+            let below = world.get_block_in(dim, x, y - 1, z);
+            if fluid == FluidKind::Water
+                && let Some((FluidKind::Lava, lava_lvl)) = classify_fluid(below, &regs)
+            {
+                let hardened = if lava_lvl == 0 {
+                    regs.block_by_name("minecraft:obsidian")
+                } else {
+                    regs.block_by_name("minecraft:cobblestone")
+                };
+                if let Some(b) = hardened
+                    && world.set_block_in(dim, x, y - 1, z, b.default_state)
+                {
+                    updates.push((dim, x, y - 1, z, b.default_state));
+                    self.on_block_changed_in(world, dim, x, y - 1, z, cur_tick);
+                }
+                return;
+            }
+            if regs.is_air_state(below)
+                && let Some(fall_state) = fluid.state_for_level(8, &regs)
+                && world.set_block_in(dim, x, y - 1, z, fall_state)
+            {
+                updates.push((dim, x, y - 1, z, fall_state));
+                self.push(ScheduledEntry {
+                    due_tick: cur_tick.saturating_add(delay),
+                    dim,
+                    x,
+                    y: y - 1,
+                    z,
+                    action: SimAction::FluidSpread { depth: 8 },
+                });
+                if level != 0 {
+                    return;
+                }
+            } else if classify_fluid(below, &regs).is_some_and(|(k, _)| k == fluid) && level != 0 {
+                return;
+            }
+        }
+
+        // Flow horizontally.
+        let eff_level = if level >= 8 { 0 } else { level };
+        let next_level = eff_level.saturating_add(step);
+        if next_level <= max_level
+            && let Some(flow_state) = fluid.state_for_level(next_level, &regs)
+        {
+            for (nx, nz) in horiz {
+                let target = world.get_block_in(dim, nx, y, nz);
+                if fluid == FluidKind::Water
+                    && let Some((FluidKind::Lava, lava_lvl)) = classify_fluid(target, &regs)
+                {
+                    let hardened = if lava_lvl == 0 {
+                        regs.block_by_name("minecraft:obsidian")
+                    } else {
+                        regs.block_by_name("minecraft:cobblestone")
+                    };
+                    if let Some(b) = hardened
+                        && world.set_block_in(dim, nx, y, nz, b.default_state)
+                    {
+                        updates.push((dim, nx, y, nz, b.default_state));
+                        self.on_block_changed_in(world, dim, nx, y, nz, cur_tick);
+                    }
+                    continue;
+                }
+                if fluid == FluidKind::Lava
+                    && let Some((FluidKind::Water, _)) = classify_fluid(target, &regs)
+                    && let Some(cobble) = regs.block_by_name("minecraft:cobblestone")
+                {
+                    if world.set_block_in(dim, nx, y, nz, cobble.default_state) {
+                        updates.push((dim, nx, y, nz, cobble.default_state));
+                        self.on_block_changed_in(world, dim, nx, y, nz, cur_tick);
+                    }
+                    continue;
+                }
+                if regs.is_air_state(target) && world.set_block_in(dim, nx, y, nz, flow_state) {
+                    updates.push((dim, nx, y, nz, flow_state));
+                    self.push(ScheduledEntry {
+                        due_tick: cur_tick.saturating_add(delay),
+                        dim,
+                        x: nx,
+                        y,
+                        z: nz,
+                        action: SimAction::FluidSpread { depth: next_level },
+                    });
+                }
+            }
+        }
     }
 }

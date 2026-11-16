@@ -78,7 +78,7 @@ async fn main() {
 
     print_startup_banner("RadLimbo", env!("CARGO_PKG_VERSION"), LIMBO_BANNER);
 
-    let cfg_path = resolve_config_path("radlimbo.toml");
+    let cfg_path = resolve_config_path("rad.properties");
     let cfg = match LimboConfig::load_or_create(&cfg_path) {
         Ok(c) => c,
         Err(e) => {

@@ -235,10 +235,15 @@ pub(super) fn encode_section_block_states_with(
 pub struct AnvilRegion;
 
 impl AnvilRegion {
-    fn region_path(world_dir: &Path, chunk_x: i32, chunk_z: i32) -> PathBuf {
+    fn region_path_in(world_dir: &Path, subdir: &str, chunk_x: i32, chunk_z: i32) -> PathBuf {
         let rx = chunk_x.div_euclid(32);
         let rz = chunk_z.div_euclid(32);
-        world_dir.join("region").join(format!("r.{rx}.{rz}.mca"))
+        world_dir.join(subdir).join(format!("r.{rx}.{rz}.mca"))
+    }
+
+    #[cfg(test)]
+    fn region_path(world_dir: &Path, chunk_x: i32, chunk_z: i32) -> PathBuf {
+        Self::region_path_in(world_dir, "region", chunk_x, chunk_z)
     }
 
     fn header_index(chunk_x: i32, chunk_z: i32) -> usize {
@@ -247,14 +252,24 @@ impl AnvilRegion {
         (lx + lz * 32) * 4
     }
 
-    /// Reads raw compressed chunk payload from `.mca`, distinguishing absent (`Ok(None)`)
+    /// Reads raw compressed chunk payload from `<world_dir>/region/*.mca`, distinguishing absent (`Ok(None)`)
     /// from corrupt/oversized sectors (`Err(AnvilDecodeError::ForeignOrCorrupt)`).
     pub fn read_chunk_payload_checked(
         world_dir: &Path,
         chunk_x: i32,
         chunk_z: i32,
     ) -> std::result::Result<Option<Vec<u8>>, AnvilDecodeError> {
-        let path = Self::region_path(world_dir, chunk_x, chunk_z);
+        Self::read_subdir_chunk_payload_checked(world_dir, "region", chunk_x, chunk_z)
+    }
+
+    /// Reads raw compressed chunk payload from `<world_dir>/<subdir>/*.mca`.
+    pub fn read_subdir_chunk_payload_checked(
+        world_dir: &Path,
+        subdir: &str,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> std::result::Result<Option<Vec<u8>>, AnvilDecodeError> {
+        let path = Self::region_path_in(world_dir, subdir, chunk_x, chunk_z);
         let mut file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -304,6 +319,52 @@ impl AnvilRegion {
         Ok(Some(payload))
     }
 
+    /// Reads all valid zlib-compressed chunk payloads from a single `.mca` file in one pass.
+    pub fn read_all_payloads_from_file(path: &Path) -> Vec<Vec<u8>> {
+        let Ok(mut file) = File::open(path) else {
+            return Vec::new();
+        };
+        let mut header = [0u8; HEADER_BYTES];
+        if file.read_exact(&mut header).is_err() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for idx in (0..4096).step_by(4) {
+            let offset_sectors = ((u32::from(header[idx]) << 16)
+                | (u32::from(header[idx + 1]) << 8)
+                | u32::from(header[idx + 2])) as u64;
+            let sector_count = header[idx + 3];
+            if offset_sectors < 2 || sector_count == 0 {
+                continue;
+            }
+            if file
+                .seek(SeekFrom::Start(offset_sectors * SECTOR_BYTES as u64))
+                .is_err()
+            {
+                continue;
+            }
+            let mut len_buf = [0u8; 5];
+            if file.read_exact(&mut len_buf).is_err() {
+                continue;
+            }
+            let declared_len =
+                u32::from_be_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) as usize;
+            if declared_len == 0 {
+                continue;
+            }
+            let payload_len = declared_len - 1;
+            let compression_type = len_buf[4];
+            if compression_type != 2 || payload_len + 5 > usize::from(sector_count) * SECTOR_BYTES {
+                continue;
+            }
+            let mut payload = vec![0u8; payload_len];
+            if file.read_exact(&mut payload).is_ok() {
+                out.push(payload);
+            }
+        }
+        out
+    }
+
     /// Reads raw compressed chunk payload from `.mca` (returns `None` if absent).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn read_chunk_payload(world_dir: &Path, chunk_x: i32, chunk_z: i32) -> Option<Vec<u8>> {
@@ -312,10 +373,21 @@ impl AnvilRegion {
             .flatten()
     }
 
-    /// Writes a zlib-compressed chunk payload into the `.mca` region file, reusing in-place
+    /// Writes a zlib-compressed chunk payload into `<world_dir>/region/r.<rx>.<rz>.mca`, reusing in-place
     /// sectors when large enough and rejecting payloads exceeding 255 sectors (`1020 KiB`).
     pub fn write_chunk_payload(
         world_dir: &Path,
+        chunk_x: i32,
+        chunk_z: i32,
+        zlib_payload: &[u8],
+    ) -> std::io::Result<()> {
+        Self::write_subdir_chunk_payload(world_dir, "region", chunk_x, chunk_z, zlib_payload)
+    }
+
+    /// Writes a zlib-compressed chunk payload into `<world_dir>/<subdir>/r.<rx>.<rz>.mca`.
+    pub fn write_subdir_chunk_payload(
+        world_dir: &Path,
+        subdir: &str,
         chunk_x: i32,
         chunk_z: i32,
         zlib_payload: &[u8],
@@ -329,7 +401,7 @@ impl AnvilRegion {
             )
         })?;
 
-        let path = Self::region_path(world_dir, chunk_x, chunk_z);
+        let path = Self::region_path_in(world_dir, subdir, chunk_x, chunk_z);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -462,8 +534,11 @@ pub fn block_light_opacity_with(
     state_id: u16,
     provider: &dyn rad_core::registry_provider::RegistryProvider,
 ) -> u8 {
+    if state_id == 0 {
+        return 0;
+    }
     let Some(def) = provider.block_by_state(state_id) else {
-        return if state_id == 0 { 0 } else { 15 };
+        return 15;
     };
     match def.name.as_str() {
         "minecraft:air"
@@ -477,23 +552,79 @@ pub fn block_light_opacity_with(
         | "minecraft:lever"
         | "minecraft:wheat"
         | "minecraft:fire"
-        | "minecraft:nether_portal" => 0,
-        "minecraft:water" | "minecraft:ice" => 1,
-        name if name.ends_with("_leaves")
-            || name.ends_with("_glass")
-            || name.ends_with("_pane") =>
-        {
-            1
+        | "minecraft:nether_portal"
+        | "minecraft:end_portal"
+        | "minecraft:pink_petals"
+        | "minecraft:wildflowers"
+        | "minecraft:leaf_litter"
+        | "minecraft:bush"
+        | "minecraft:firefly_bush"
+        | "minecraft:short_dry_grass"
+        | "minecraft:tall_dry_grass"
+        | "minecraft:cactus_flower"
+        | "minecraft:lily_pad"
+        | "minecraft:glow_lichen"
+        | "minecraft:sculk_vein" => 0,
+        "minecraft:water" | "minecraft:ice" | "minecraft:cobweb" => 1,
+        name if name.ends_with("_leaves") => 1,
+        name if name.ends_with("_glass") || name.ends_with("_pane") => 0,
+        _ => {
+            // Non-full cubes (grass, flowers, ferns, rails, fences, slabs, stairs, etc.) do not block skylight.
+            match rad_version::shapes::block_collision_shape_with(state_id, provider) {
+                Some(shape) => {
+                    let boxes = shape.as_boxes();
+                    if boxes.len() == 1 && boxes[0] == rad_version::shapes::BlockBox::FULL {
+                        15
+                    } else {
+                        0
+                    }
+                }
+                None => 15,
+            }
         }
-        name if name.ends_with("_slab")
-            || name.ends_with("_stairs")
-            || name.ends_with("_fence")
-            || name.ends_with("_door")
-            || name.ends_with("_sapling") =>
-        {
-            0
+    }
+}
+
+/// Precomputed per-block-state light opacity and emission lookup tables (`O(1)` indexing).
+#[derive(Debug, Clone)]
+pub struct LightTables {
+    opacity: Vec<u8>,
+    emission: Vec<u8>,
+}
+
+impl LightTables {
+    /// Builds lookup tables covering all block states registered in `provider` (up to `32768`).
+    #[must_use]
+    pub fn from_provider(provider: &dyn rad_core::registry_provider::RegistryProvider) -> Self {
+        const TABLE_LEN: usize = 32_768;
+        let mut opacity = Vec::with_capacity(TABLE_LEN);
+        let mut emission = Vec::with_capacity(TABLE_LEN);
+        for raw in 0..TABLE_LEN {
+            let state = raw as u16;
+            opacity.push(block_light_opacity_with(state, provider));
+            emission.push(block_light_emission_with(state, provider));
         }
-        _ => 15,
+        Self { opacity, emission }
+    }
+
+    /// Returns precomputed light opacity (`0`, `1`, or `15`) for `state_id`.
+    #[inline]
+    #[must_use]
+    pub fn opacity(&self, state_id: u16) -> u8 {
+        self.opacity
+            .get(usize::from(state_id))
+            .copied()
+            .unwrap_or(15)
+    }
+
+    /// Returns precomputed light emission (`0..=15`) for `state_id`.
+    #[inline]
+    #[must_use]
+    pub fn emission(&self, state_id: u16) -> u8 {
+        self.emission
+            .get(usize::from(state_id))
+            .copied()
+            .unwrap_or(0)
     }
 }
 

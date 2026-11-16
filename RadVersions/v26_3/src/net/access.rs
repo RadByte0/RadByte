@@ -80,10 +80,16 @@ impl AccessControl {
             std::path::Path::new(".")
         }
     }
-    /// Loads access control lists from `<world_dir>/access_control.json`, returning defaults if missing.
+    /// Loads access control lists from `<lists_dir>/access_control.json` (or legacy `<world_dir>/access_control.json`), returning defaults if missing.
     #[must_use]
     pub fn load_from_dir(world_dir: &std::path::Path) -> Self {
-        let path = world_dir.join("access_control.json");
+        let primary_path = Self::lists_dir(world_dir).join("access_control.json");
+        let legacy_path = world_dir.join("access_control.json");
+        let path = if primary_path.exists() {
+            primary_path
+        } else {
+            legacy_path
+        };
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
@@ -213,7 +219,7 @@ impl AccessControl {
         }
     }
 
-    /// Atomically writes an [`AccessControl`] snapshot to `<world_dir>/access_control.json`.
+    /// Atomically writes an [`AccessControl`] snapshot to `<lists_dir>/access_control.json`, `ops.json`, and `whitelist.json`.
     pub fn write_snapshot_atomic(world_dir: &std::path::Path, snap: &Self) -> std::io::Result<()> {
         if snap.lists_invalid {
             return Err(std::io::Error::new(
@@ -221,13 +227,30 @@ impl AccessControl {
                 "invalid ops.json or whitelist.json; fix it before saving",
             ));
         }
-        std::fs::create_dir_all(world_dir)?;
-        let path = world_dir.join("access_control.json");
-        let tmp = world_dir.join(format!("access_control.json.{}", unique_tmp_suffix()));
+        let lists_dir = Self::lists_dir(world_dir);
+        std::fs::create_dir_all(lists_dir)?;
+        let path = lists_dir.join("access_control.json");
+        let tmp = lists_dir.join(format!("access_control.json.{}", unique_tmp_suffix()));
         let json = serde_json::to_string_pretty(snap)
             .map_err(|e| std::io::Error::other(format!("access serialize failed: {e}")))?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)?;
+        let legacy_path = world_dir.join("access_control.json");
+        if legacy_path != path && legacy_path.exists() {
+            let _ = std::fs::remove_file(&legacy_path);
+        }
+        let banned_players: Vec<serde_json::Value> = snap
+            .banned
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect();
+        if let Ok(banned_json) = serde_json::to_string_pretty(&banned_players) {
+            let bp_path = lists_dir.join("banned-players.json");
+            let bp_tmp = lists_dir.join(format!("banned-players.json.{}", unique_tmp_suffix()));
+            if std::fs::write(&bp_tmp, banned_json).is_ok() {
+                let _ = std::fs::rename(&bp_tmp, &bp_path);
+            }
+        }
         for (name, json) in [
             ("ops.json", serde_json::to_string_pretty(&snap.op_entries)),
             (
@@ -417,7 +440,9 @@ impl AccessControl {
             .find(|e| e.name.eq_ignore_ascii_case(&name))
         {
             let mut changed = false;
-            if existing.uuid.is_none() && uuid.is_some() {
+            if (existing.uuid.is_none() && uuid.is_some())
+                || (existing.uuid.is_some() && uuid.is_none())
+            {
                 existing.uuid = uuid;
                 changed = true;
             }
@@ -533,6 +558,25 @@ mod identity_review_tests {
         assert!(access.is_allowed_by_whitelist_identity("Renamed", Some(id), false, true));
         access.add_op(None, "LocalAdmin".into(), 2);
         assert_eq!(access.op_level_for_identity("LocalAdmin", None, false), 2);
+    }
+
+    #[test]
+    fn local_op_unbinds_previous_uuid_for_unforwarded_mode() {
+        let id = Uuid::from_u128(99);
+        let mut access = AccessControl::default();
+        assert!(access.add_op(Some(id), "AnarchByte".into(), 4));
+        assert_eq!(
+            access.op_level_for_identity("AnarchByte", Some(id), false),
+            0
+        );
+
+        // Running `op AnarchByte` in unforwarded mode (`uuid = None`) must unbind the UUID
+        // so the operator receives level 4 in local/unforwarded mode as well.
+        assert!(access.add_op(None, "AnarchByte".into(), 4));
+        assert_eq!(
+            access.op_level_for_identity("AnarchByte", Some(id), false),
+            4
+        );
     }
 
     #[test]

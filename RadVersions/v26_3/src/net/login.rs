@@ -126,16 +126,16 @@ pub(super) async fn handle_login_and_play(
         return;
     }
 
-    if !run_configuration(
+    let Some(client_view_distance) = run_configuration(
         &mut stream,
         &mut read_buf,
         cfg,
         state.registries.provider().as_ref(),
     )
     .await
-    {
+    else {
         return;
-    }
+    };
 
     run_play(
         stream,
@@ -144,6 +144,7 @@ pub(super) async fn handle_login_and_play(
         player_uuid,
         username,
         properties,
+        client_view_distance,
         state,
     )
     .await;
@@ -248,12 +249,13 @@ pub(super) async fn run_configuration(
     read_buf: &mut BytesMut,
     cfg: &ServerConfig,
     provider: &dyn rad_core::registry_provider::RegistryProvider,
-) -> bool {
+) -> Option<Option<i32>> {
+    let mut client_view_distance: Option<i32> = None;
     let mut batch = BytesMut::with_capacity(1024);
 
     let mut brand_payload = BytesMut::new();
     if write_string(&mut brand_payload, &cfg.brand, 32_767).is_err() {
-        return false;
+        return None;
     }
     if encode_packet(
         &ConfigClientboundPluginMessage {
@@ -264,7 +266,7 @@ pub(super) async fn run_configuration(
     )
     .is_err()
     {
-        return false;
+        return None;
     }
 
     if encode_packet(
@@ -279,11 +281,11 @@ pub(super) async fn run_configuration(
     )
     .is_err()
     {
-        return false;
+        return None;
     }
 
     if stream.write_all(&batch).await.is_err() {
-        return false;
+        return None;
     }
     batch.clear();
 
@@ -292,7 +294,7 @@ pub(super) async fn run_configuration(
     let client_has_core = loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return None;
         }
         let frame = match timeout(
             remaining,
@@ -301,13 +303,17 @@ pub(super) async fn run_configuration(
         .await
         {
             Ok(Some(frame)) => frame,
-            _ => return false,
+            _ => return None,
         };
-        if frame.id == rad_core::packet::configuration::ServerboundKnownPacks::ID {
+        if frame.id == 0x00
+            && let Some(vd) = decode_client_view_distance(&frame.payload)
+        {
+            client_view_distance = Some(vd);
+        } else if frame.id == rad_core::packet::configuration::ServerboundKnownPacks::ID {
             let Ok(known) =
                 frame.decode_as::<rad_core::packet::configuration::ServerboundKnownPacks>()
             else {
-                return false;
+                return None;
             };
             break known.packs.iter().any(|p| {
                 p.namespace == "minecraft" && p.id == "core" && p.version == MINECRAFT_VERSION
@@ -322,35 +328,44 @@ pub(super) async fn run_configuration(
     };
     for reg in &registries {
         if encode_packet(reg, &mut batch).is_err() {
-            return false;
+            return None;
         }
     }
 
-    let Ok(tags_pkt) =
-        rad_core::packet::configuration::ConfigUpdateTags::for_registries_with_provider(
+    let tags_pkt =
+        match rad_core::packet::configuration::ConfigUpdateTags::for_registries_with_provider(
             &registries,
             provider,
-        )
-    else {
-        tracing::error!("configuration tags unavailable; refusing configuration");
-        return false;
-    };
+        ) {
+            Ok(tags) => tags,
+            Err(rad_core::registry_provider::RegistryProviderError::MissingData(reason)) => {
+                tracing::warn!(
+                    reason = %reason,
+                    "configuration tags not packaged in version data; sending minimal fallback update_tags"
+                );
+                super::fallback_tags::minimal_fallback_update_tags()
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "configuration tags invalid; refusing configuration");
+                return None;
+            }
+        };
     if encode_packet(&tags_pkt, &mut batch).is_err() {
-        return false;
+        return None;
     }
 
     if encode_packet(&FinishConfiguration, &mut batch).is_err() {
-        return false;
+        return None;
     }
 
     if stream.write_all(&batch).await.is_err() {
-        return false;
+        return None;
     }
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return None;
         }
         let frame = match timeout(
             remaining,
@@ -359,10 +374,14 @@ pub(super) async fn run_configuration(
         .await
         {
             Ok(Some(frame)) => frame,
-            _ => return false,
+            _ => return None,
         };
-        if frame.id == AcknowledgeFinishConfiguration::ID {
-            return true;
+        if frame.id == 0x00
+            && let Some(vd) = decode_client_view_distance(&frame.payload)
+        {
+            client_view_distance = Some(vd);
+        } else if frame.id == AcknowledgeFinishConfiguration::ID {
+            return Some(client_view_distance);
         }
     }
 }

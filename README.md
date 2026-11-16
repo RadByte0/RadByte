@@ -19,9 +19,9 @@ Configuration templates are stored in `config/templates/`. For local startup, us
 | :--- | :--- | :--- |
 | [`RadCore`](RadCore) | Shared core: `VarInt`/`VarLong`, Network NBT, codec, `AES-128-CFB8`, `Velocity Modern Forwarding`, MC 26.3 packets, CLI utilities | — |
 | [`RadAPI`](RadAPI) | Stable SDK (`v1`) for native and `.wasm` plugins (Radons) for `RadProxy` and `RadServer` | — |
-| [`RadProxy`](RadProxy) | High-performance L7 proxy, `IpFilter`, `bungeecord:main`, `/metrics`, `DeclareCommands`, WASM radons | [`radproxy.toml`](config/templates/radproxy.toml) |
-| [`RadLimbo`](RadLimbo) | Ultra-lightweight limbo/fallback server (`Login → Configuration → Play`) | [`radlimbo.toml`](config/templates/radlimbo.toml) |
-| [`RadServer`](RadServer) | Version module host-launcher: reads `versions/version.toml`, verifies manifest/ABI/SHA-256, and loads the version library | [`rad.properties`](config/templates/rad.properties) |
+| [`RadProxy`](RadProxy) | High-performance L7 proxy, `IpFilter`, `bungeecord:main`, `/metrics`, `DeclareCommands`, WASM radons | [`rad.properties`](config/templates/RadProxy/rad.properties) |
+| [`RadLimbo`](RadLimbo) | Ultra-lightweight limbo/fallback server (`Login → Configuration → Play`) | [`rad.properties`](config/templates/RadLimbo/rad.properties) |
+| [`RadServer`](RadServer) | Version module host-launcher: reads `versions/version.toml`, verifies manifest/ABI/SHA-256, and loads the version library | [`rad.properties`](config/templates/RadServer/rad.properties) |
 | [`RadVersions/common`](RadVersions/common) | `rad-version` crate: version descriptors (`MC_26_3`), world compatibility checks (`WorldMechanicsProfile`, `level.dat`), safe backup, shared `shapes`/`physics` | — |
 | [`RadVersions/v26_3`](RadVersions/v26_3) | Standalone Minecraft 26.3 implementation (`protocol 777`, C ABI v1 `rad_version_26_3`): 20 TPS, chunks/Anvil `.mca`, inventory, simulation/redstone, survival, mob AI, `RadAPI v1` WASM | — |
 

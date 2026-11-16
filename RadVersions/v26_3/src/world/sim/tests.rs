@@ -564,6 +564,44 @@ fn piston_push_and_sticky_piston_pull() {
 }
 
 #[test]
+fn piston_repeater_indirect_power_and_partner_cleanup() {
+    let mut world = new_test_world();
+    let mut sim = WorldSim::default();
+
+    let piston_min = mc_blocks::by_name("minecraft:piston").unwrap().min_state;
+    let piston_east = piston_min + 6 + 1;
+    world.set_block(0, 64, 0, piston_east);
+    world.set_block(1, 64, 0, 1); // stone in front
+
+    // Powered repeater at (-1, 64, 0) pointing east (facing=3, powered=true -> min + 3*4 + 2 + 0 = min + 14)
+    let rep_min = mc_blocks::by_name("minecraft:repeater").unwrap().min_state;
+    world.set_block(-1, 64, 0, rep_min + 14);
+    sim.update_redstone_around_in(&mut world, DimensionId::Overworld, -1, 64, 0);
+    assert_eq!(world.get_block(0, 64, 0), piston_min + 1); // extended
+    assert_eq!(world.get_block(2, 64, 0), 1); // pushed stone
+
+    let head_state = world.get_block(1, 64, 0);
+    assert_eq!(
+        crate::world::sim::piston_partner_pos(piston_min + 1, 0, 64, 0, world.registries()),
+        Some((1, 64, 0))
+    );
+    assert_eq!(
+        crate::world::sim::piston_partner_pos(head_state, 1, 64, 0, world.registries()),
+        Some((0, 64, 0))
+    );
+
+    // Unpower repeater and test indirect power via solid block + lever
+    world.set_block(-1, 64, 0, 0);
+    sim.update_redstone_around_in(&mut world, DimensionId::Overworld, -1, 64, 0);
+    assert_eq!(world.get_block(0, 64, 0), piston_east);
+
+    world.set_block(-1, 64, 0, 1); // solid stone next to piston
+    world.set_block(-2, 64, 0, LEVER_OFF_STATE);
+    sim.toggle_lever_in(&mut world, DimensionId::Overworld, -2, 64, 0);
+    assert_eq!(world.get_block(0, 64, 0), piston_min + 1); // indirectly powered!
+}
+
+#[test]
 fn orient_block_on_place_handles_pistons_stairs_furnace_lever_and_wall_torch() {
     let furnace = mc_blocks::by_name("minecraft:furnace").unwrap();
     // Player looking south (yaw=0) -> furnace faces north (min + 0*2 + 1)

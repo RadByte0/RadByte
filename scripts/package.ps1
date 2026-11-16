@@ -33,7 +33,13 @@ try {
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($rngBytes)
     $freshSecret = ($rngBytes | ForEach-Object { $_.ToString("x2") }) -join ""
 
-    foreach ($relativeConfig in @('dist/RadProxy/radproxy.toml', 'dist/RadLimbo/radlimbo.toml', 'dist/RadServer/config/radserver-extra.properties')) {
+    foreach ($relativeConfig in @(
+        'dist/RadProxy/rad.properties',
+        'dist/RadProxy/radproxy.toml',
+        'dist/RadLimbo/rad.properties',
+        'dist/RadLimbo/radlimbo.toml',
+        'dist/RadServer/config/radserver-extra.properties'
+    )) {
         $existingConfig = Join-Path $root $relativeConfig
         if (Test-Path -LiteralPath $existingConfig) {
             $existingText = Get-Content -Raw -LiteralPath $existingConfig
@@ -44,9 +50,9 @@ try {
         }
     }
     $services = @(
-        @{ Name = "RadProxy";  Bin = "rad-proxy.exe";  Config = "radproxy.toml" },
-        @{ Name = "RadLimbo";  Bin = "rad-limbo.exe";  Config = "radlimbo.toml" },
-        @{ Name = "RadServer"; Bin = "rad-server.exe"; Config = "rad.properties" }
+        @{ Name = "RadProxy";  Bin = "rad-proxy.exe";  Template = "RadProxy\rad.properties";  Config = "rad.properties" },
+        @{ Name = "RadLimbo";  Bin = "rad-limbo.exe";  Template = "RadLimbo\rad.properties";  Config = "rad.properties" },
+        @{ Name = "RadServer"; Bin = "rad-server.exe"; Template = "RadServer\rad.properties"; Config = "rad.properties" }
     )
 
     $manifestBins = @()
@@ -76,17 +82,17 @@ try {
         }
 
         if ($svc.Config) {
-            $srcCfg = Join-Path $defaultsDir $svc.Config
+            $srcCfg = Join-Path $defaultsDir $svc.Template
+            if (-not (Test-Path $srcCfg)) {
+                $srcCfg = Join-Path $defaultsDir $svc.Config
+            }
             $dstCfg = Join-Path $dest $svc.Config
             $legacyServerCfg = Join-Path $dest "radserver.toml"
             if ((Test-Path $srcCfg) -and -not (Test-Path $dstCfg) -and
                 -not ($svc.Name -eq "RadServer" -and (Test-Path $legacyServerCfg))) {
                 $cfgText = Get-Content -Raw -Encoding UTF8 $srcCfg
-                if ($svc.Name -eq "RadServer") {
-                    $cfgText = $cfgText -replace '(?m)^forwarding-secret=.*$', ("forwarding-secret=$freshSecret")
-                } else {
-                    $cfgText = $cfgText -replace 'forwarding_secret\s*=\s*"[^"]*"', ("forwarding_secret = `"$freshSecret`"")
-                }
+                $cfgText = $cfgText -replace '(?m)^forwarding-secret=.*$', ("forwarding-secret=$freshSecret")
+                $cfgText = $cfgText -replace 'forwarding_secret\s*=\s*"[^"]*"', ("forwarding_secret = `"$freshSecret`"")
                 [System.IO.File]::WriteAllText($dstCfg, $cfgText, [System.Text.UTF8Encoding]::new($false))
                 if ($svc.Name -eq "RadServer") {
                     $srcExtra = Join-Path $defaultsDir "radserver-extra.properties"

@@ -72,6 +72,33 @@ async fn e2e_server_block_break_and_place() {
     assert!(saw_place_update);
     assert_eq!(state.world.write().await.get_block(2, 64, 2), 1);
 
+    // A finish without a matching start must restore the client's predicted block.
+    send_packet(
+        &mut p1,
+        &PlayerAction {
+            status: VarInt(2),
+            location: BlockPos::new(2, 64, 2),
+            face: 1,
+            sequence: VarInt(13),
+        },
+    )
+    .await
+    .unwrap();
+    let mut restored = false;
+    for _ in 0..20 {
+        let frame = tokio::time::timeout(Duration::from_secs(2), read_raw_frame(&mut p1, &mut buf1, 1024 * 1024))
+            .await.unwrap().unwrap();
+        if frame.id == BlockUpdate::ID {
+            let update = frame.decode_as::<BlockUpdate>().unwrap();
+            if update.pos == BlockPos::new(2, 64, 2) && update.block_state.0 == 1 {
+                restored = true;
+                break;
+            }
+        }
+    }
+    assert!(restored, "rejected break must restore the block on the client");
+    assert_eq!(state.world.write().await.get_block(2, 64, 2), 1);
+
     // Start digging (2, 64, 2), wait >=40ms for Survival mining timer, then finish digging -> air (0)
     send_packet(
         &mut p1,

@@ -167,8 +167,23 @@ pub struct VersionManifest {
     pub files: Vec<VersionPackageFile>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Optional version-specific mining properties supplied by the data package.
+pub struct BlockMiningProperties {
+    /// Block hardness; -1 marks an unbreakable block.
+    pub hardness: f64,
+    /// Effective vanilla tool category, or null when no tool has a speed bonus.
+    pub effective_tool: Option<String>,
+    /// Whether a correct tool is required for drops.
+    pub requires_tool: bool,
+    /// Minimum harvest tier: 0 wooden/golden, 1 stone, 2 iron, 3 diamond/netherite.
+    #[serde(default)]
+    pub min_tool_tier: Option<u8>,
+}
+
 /// Runtime block definition loaded from `data/blocks.json`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BlockPackageDef {
     /// Numeric block registry ID.
     pub block_id: u16,
@@ -180,6 +195,8 @@ pub struct BlockPackageDef {
     pub min_state: u16,
     /// Maximum block state ID.
     pub max_state: u16,
+    /// Optional independently supplied mining data.
+    pub mining: Option<BlockMiningProperties>,
 }
 
 #[derive(Deserialize)]
@@ -205,6 +222,8 @@ struct BlockJsonEntry {
     default_state: u16,
     min_state: u16,
     max_state: u16,
+    #[serde(default)]
+    mining: Option<BlockMiningProperties>,
 }
 
 #[derive(Deserialize)]
@@ -659,6 +678,47 @@ impl LoadedVersionPackage {
         self.item_names_by_id.get(&id).map(String::as_str)
     }
 
+    /// Iterates over all namespaced item names in this version package.
+    pub fn item_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.items_by_name.keys().map(String::as_str)
+    }
+
+    /// Creates an in-memory synthetic package for unit tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn minimal_synthetic_for_tests(items: &[(&str, i32)]) -> Self {
+        let mut items_by_name = HashMap::with_capacity(items.len());
+        let mut item_names_by_id = HashMap::with_capacity(items.len());
+        for (name, id) in items {
+            items_by_name.insert((*name).to_owned(), *id);
+            item_names_by_id.insert(*id, (*name).to_owned());
+        }
+        Self {
+            manifest: VersionManifest {
+                schema_version: VERSION_PACKAGE_SCHEMA_VERSION,
+                game_version: "26.3".to_owned(),
+                protocol_version: 777,
+                package_format_version: VERSION_PACKAGE_FORMAT_VERSION,
+                world_data_version: 4786,
+                source: "synthetic-unit-test".to_owned(),
+                generated_utc: "2026-11-15T00:00:00Z".to_owned(),
+                notes: None,
+                library: None,
+                files: Vec::new(),
+            },
+            package_dir: PathBuf::new(),
+            items_by_name,
+            item_names_by_id,
+            blocks_by_name: HashMap::new(),
+            blocks_by_state: Vec::new(),
+            entities_by_name: HashMap::new(),
+            menus_by_name: HashMap::new(),
+            block_tags: None,
+            item_tags: None,
+            core_registry_tags: None,
+        }
+    }
+
     /// Looks up a block definition by namespaced or short name.
     #[must_use]
     pub fn block_by_name(&self, raw: &str) -> Option<&BlockPackageDef> {
@@ -980,6 +1040,23 @@ fn parse_blocks(
                 format!("invalid block entry '{}'", entry.name),
             ));
         }
+        if let Some(ref mining) = entry.mining
+            && (!mining.hardness.is_finite()
+                || mining.hardness < -1.0
+                || (mining.hardness < 0.0 && mining.hardness != -1.0)
+                || mining.min_tool_tier.is_some_and(|tier| tier > 3)
+                || mining.effective_tool.as_deref().is_some_and(|tool| {
+                    !matches!(
+                        tool,
+                        "pickaxe" | "axe" | "shovel" | "hoe" | "shears" | "sword"
+                    )
+                }))
+        {
+            return Err(VersionPackageError::new(
+                path,
+                format!("invalid mining properties for '{}'", entry.name),
+            ));
+        }
         if !seen_ids.insert(entry.block_id) {
             return Err(VersionPackageError::new(
                 path,
@@ -998,6 +1075,7 @@ fn parse_blocks(
                     default_state: entry.default_state,
                     min_state: entry.min_state,
                     max_state: entry.max_state,
+                    mining: entry.mining,
                 },
             )
             .is_some()
@@ -1153,6 +1231,36 @@ fn parse_tags(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_optional_mining_properties() {
+        let valid = r#"{"blocks":[{"block_id":1,"name":"test:block","default_state":1,"min_state":1,"max_state":1,"mining":{"hardness":0.5,"effective_tool":"shovel","requires_tool":false}}]}"#;
+        let parsed = parse_blocks(
+            serde_json::from_str(valid).unwrap(),
+            Path::new("blocks.json"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(parsed["test:block"].mining.as_ref().unwrap().hardness, 0.5);
+        let invalid = valid.replace("\"shovel\"", "\"unknown\"");
+        assert!(
+            parse_blocks(
+                serde_json::from_str(&invalid).unwrap(),
+                Path::new("blocks.json"),
+                1
+            )
+            .is_err()
+        );
+        let invalid = valid.replace("0.5", "-0.5");
+        assert!(
+            parse_blocks(
+                serde_json::from_str(&invalid).unwrap(),
+                Path::new("blocks.json"),
+                1
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn rejects_overlapping_block_state_ranges() {

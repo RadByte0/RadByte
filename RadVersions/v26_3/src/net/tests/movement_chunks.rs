@@ -401,6 +401,7 @@ async fn max_world_size_rejects_out_of_bounds_movement() {
         Some((11.5, 65.0, 0.0)),
         None,
         0.05,
+        state.config.view_distance,
     )
     .await;
 

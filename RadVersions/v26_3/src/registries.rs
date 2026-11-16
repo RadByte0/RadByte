@@ -143,16 +143,32 @@ pub struct ItemIds {
 pub struct EntityIds {
     /// `minecraft:arrow`
     pub arrow: i32,
+    /// `minecraft:chicken`
+    pub chicken: i32,
+    /// `minecraft:cow`
+    pub cow: i32,
+    /// `minecraft:creeper`
+    pub creeper: i32,
+    /// `minecraft:enderman`
+    pub enderman: i32,
+    /// `minecraft:iron_golem`
+    pub iron_golem: i32,
     /// `minecraft:item`
     pub item: i32,
     /// `minecraft:pig`
     pub pig: i32,
     /// `minecraft:player`
     pub player: i32,
+    /// `minecraft:sheep`
+    pub sheep: i32,
     /// `minecraft:skeleton`
     pub skeleton: i32,
     /// `minecraft:snowball`
     pub snowball: i32,
+    /// `minecraft:spider`
+    pub spider: i32,
+    /// `minecraft:villager`
+    pub villager: i32,
     /// `minecraft:zombie`
     pub zombie: i32,
 }
@@ -277,14 +293,32 @@ impl Version26_3Registries {
             wooden_pickaxe: require_item(provider.as_ref(), "minecraft:wooden_pickaxe")?,
         };
 
+        let pig = require_entity(provider.as_ref(), "minecraft:pig")?;
+        let zombie = require_entity(provider.as_ref(), "minecraft:zombie")?;
         let entities = EntityIds {
             arrow: require_entity(provider.as_ref(), "minecraft:arrow")?,
+            chicken: provider.entity_by_name("minecraft:chicken").unwrap_or(pig),
+            cow: provider.entity_by_name("minecraft:cow").unwrap_or(pig),
+            creeper: provider
+                .entity_by_name("minecraft:creeper")
+                .unwrap_or(zombie),
+            enderman: provider
+                .entity_by_name("minecraft:enderman")
+                .unwrap_or(zombie),
+            iron_golem: provider
+                .entity_by_name("minecraft:iron_golem")
+                .unwrap_or(pig),
             item: require_entity(provider.as_ref(), "minecraft:item")?,
-            pig: require_entity(provider.as_ref(), "minecraft:pig")?,
+            pig,
             player: require_entity(provider.as_ref(), "minecraft:player")?,
+            sheep: provider.entity_by_name("minecraft:sheep").unwrap_or(pig),
             skeleton: require_entity(provider.as_ref(), "minecraft:skeleton")?,
             snowball: require_entity(provider.as_ref(), "minecraft:snowball")?,
-            zombie: require_entity(provider.as_ref(), "minecraft:zombie")?,
+            spider: provider
+                .entity_by_name("minecraft:spider")
+                .unwrap_or(zombie),
+            villager: provider.entity_by_name("minecraft:villager").unwrap_or(pig),
+            zombie,
         };
 
         let menus = MenuIds {

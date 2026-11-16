@@ -467,6 +467,64 @@ pub struct CommandNode {
     pub executable: bool,
     /// Indices of child nodes in [`DeclareCommands::nodes`].
     pub children: Vec<VarInt>,
+    /// Optional Brigadier suggestions type identifier (e.g. `"minecraft:ask_server"`).
+    pub suggestions_type: Option<String>,
+}
+
+impl CommandNode {
+    /// Creates a root node (`0x00`).
+    #[must_use]
+    pub fn root(children: Vec<VarInt>) -> Self {
+        Self {
+            kind: CommandNodeKind::Root,
+            executable: false,
+            children,
+            suggestions_type: None,
+        }
+    }
+
+    /// Creates a literal command/subcommand node (`0x01`).
+    #[must_use]
+    pub fn literal(name: impl Into<String>, executable: bool, children: Vec<VarInt>) -> Self {
+        Self {
+            kind: CommandNodeKind::Literal { name: name.into() },
+            executable,
+            children,
+            suggestions_type: None,
+        }
+    }
+
+    /// Creates a single-word string argument node (`0x02`) with optional suggestions type.
+    #[must_use]
+    pub fn word_arg(
+        name: impl Into<String>,
+        executable: bool,
+        children: Vec<VarInt>,
+        suggestions_type: Option<String>,
+    ) -> Self {
+        Self {
+            kind: CommandNodeKind::WordStringArg { name: name.into() },
+            executable,
+            children,
+            suggestions_type,
+        }
+    }
+
+    /// Creates a greedy string argument node (`0x02`) with optional suggestions type.
+    #[must_use]
+    pub fn greedy_arg(
+        name: impl Into<String>,
+        executable: bool,
+        children: Vec<VarInt>,
+        suggestions_type: Option<String>,
+    ) -> Self {
+        Self {
+            kind: CommandNodeKind::GreedyStringArg { name: name.into() },
+            executable,
+            children,
+            suggestions_type,
+        }
+    }
 }
 
 /// Clientbound `Commands` (`DeclareCommands`) packet (`0x11` in Play).
@@ -515,10 +573,16 @@ impl Packet for DeclareCommands {
                 }
                 _ => CommandNodeKind::Root,
             };
+            let suggestions_type = if (flags & 0x10) != 0 {
+                Some(read_string(buf, 32767)?)
+            } else {
+                None
+            };
             nodes.push(CommandNode {
                 kind,
                 executable,
                 children,
+                suggestions_type,
             });
         }
         let root_index = VarInt::decode(buf)?;
@@ -536,7 +600,16 @@ impl Packet for DeclareCommands {
                 }
             };
             let exec_bit: u8 = if node.executable { 0x04 } else { 0x00 };
-            (type_bits | exec_bit).encode(buf)?;
+            let suggest_bit: u8 = if node.suggestions_type.is_some()
+                && !matches!(
+                    node.kind,
+                    CommandNodeKind::Root | CommandNodeKind::Literal { .. }
+                ) {
+                0x10
+            } else {
+                0x00
+            };
+            (type_bits | exec_bit | suggest_bit).encode(buf)?;
             VarInt(node.children.len() as i32).encode(buf)?;
             for child in &node.children {
                 child.encode(buf)?;
@@ -548,15 +621,115 @@ impl Packet for DeclareCommands {
                     write_string(buf, name, 32767)?;
                     VarInt(5).encode(buf)?; // brigadier:string
                     VarInt(0).encode(buf)?; // SINGLE_WORD
+                    if let Some(ref st) = node.suggestions_type {
+                        write_string(buf, st, 32767)?;
+                    }
                 }
                 CommandNodeKind::GreedyStringArg { name } => {
                     write_string(buf, name, 32767)?;
                     VarInt(5).encode(buf)?; // brigadier:string
                     VarInt(2).encode(buf)?; // GREEDY_PHRASE
+                    if let Some(ref st) = node.suggestions_type {
+                        write_string(buf, st, 32767)?;
+                    }
                 }
             }
         }
         self.root_index.encode(buf)?;
+        Ok(())
+    }
+}
+
+/// Serverbound `Command Suggestions Request` packet (`0x0F` in Play, protocol 777).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSuggestionsRequest {
+    /// Transaction ID echoed back in [`CommandSuggestions`].
+    pub id: VarInt,
+    /// Current command input text (typically starting with `/`).
+    pub text: String,
+}
+
+impl Packet for CommandSuggestionsRequest {
+    const ID: i32 = 0x0F;
+    const STATE: ConnectionState = ConnectionState::Play;
+    const DIRECTION: PacketDirection = PacketDirection::Serverbound;
+
+    fn decode_body(buf: &mut impl Buf) -> Result<Self> {
+        Ok(Self {
+            id: VarInt::decode(buf)?,
+            text: read_string(buf, 32500)?,
+        })
+    }
+
+    fn encode_body(&self, buf: &mut impl BufMut) -> Result<()> {
+        self.id.encode(buf)?;
+        write_string(buf, &self.text, 32500)
+    }
+}
+
+/// A single tab-completion match in [`CommandSuggestions`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandSuggestionMatch {
+    /// Suggested completion text.
+    pub text: String,
+    /// Optional Network NBT text tooltip shown alongside the suggestion.
+    pub tooltip: Option<NbtTag>,
+}
+
+/// Clientbound `Command Suggestions` packet (`0x0F` in Play, protocol 777).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandSuggestions {
+    /// Transaction ID matching [`CommandSuggestionsRequest::id`].
+    pub id: VarInt,
+    /// Start character index in the input text where replacement begins.
+    pub start: VarInt,
+    /// Length of the substring to replace.
+    pub length: VarInt,
+    /// Suggested matches.
+    pub matches: Vec<CommandSuggestionMatch>,
+}
+
+impl Packet for CommandSuggestions {
+    const ID: i32 = 0x0F;
+    const STATE: ConnectionState = ConnectionState::Play;
+    const DIRECTION: PacketDirection = PacketDirection::Clientbound;
+
+    fn decode_body(buf: &mut impl Buf) -> Result<Self> {
+        let id = VarInt::decode(buf)?;
+        let start = VarInt::decode(buf)?;
+        let length = VarInt::decode(buf)?;
+        let count = VarInt::decode(buf)?.0.max(0) as usize;
+        let mut matches = Vec::with_capacity(count.min(4096));
+        for _ in 0..count {
+            let text = read_string(buf, 32767)?;
+            let has_tooltip = bool::decode(buf)?;
+            let tooltip = if has_tooltip {
+                Some(decode_network_nbt(buf)?)
+            } else {
+                None
+            };
+            matches.push(CommandSuggestionMatch { text, tooltip });
+        }
+        Ok(Self {
+            id,
+            start,
+            length,
+            matches,
+        })
+    }
+
+    fn encode_body(&self, buf: &mut impl BufMut) -> Result<()> {
+        self.id.encode(buf)?;
+        self.start.encode(buf)?;
+        self.length.encode(buf)?;
+        VarInt(self.matches.len() as i32).encode(buf)?;
+        for m in &self.matches {
+            write_string(buf, &m.text, 32767)?;
+            m.tooltip.is_some().encode(buf)?;
+            if let Some(ref tip) = m.tooltip {
+                encode_network_nbt(tip, buf)?;
+            }
+        }
         Ok(())
     }
 }
@@ -584,25 +757,9 @@ mod tests {
 
         let cmds = DeclareCommands {
             nodes: vec![
-                CommandNode {
-                    kind: CommandNodeKind::Root,
-                    executable: false,
-                    children: vec![VarInt(1)],
-                },
-                CommandNode {
-                    kind: CommandNodeKind::Literal {
-                        name: "server".into(),
-                    },
-                    executable: true,
-                    children: vec![VarInt(2)],
-                },
-                CommandNode {
-                    kind: CommandNodeKind::WordStringArg {
-                        name: "name".into(),
-                    },
-                    executable: true,
-                    children: vec![],
-                },
+                CommandNode::root(vec![VarInt(1)]),
+                CommandNode::literal("server", true, vec![VarInt(2)]),
+                CommandNode::word_arg("name", true, vec![], Some("minecraft:ask_server".into())),
             ],
             root_index: VarInt(0),
         };
@@ -614,6 +771,43 @@ mod tests {
             .decode_as()
             .unwrap();
         assert_eq!(decoded_cmds, cmds);
+
+        let req = CommandSuggestionsRequest {
+            id: VarInt(7),
+            text: "/gamemode ".into(),
+        };
+        buf.clear();
+        encode_packet(&req, &mut buf).unwrap();
+        let decoded_req: CommandSuggestionsRequest = decode_frame(&mut buf, 1024)
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        assert_eq!(decoded_req, req);
+
+        let resp = CommandSuggestions {
+            id: VarInt(7),
+            start: VarInt(10),
+            length: VarInt(0),
+            matches: vec![
+                CommandSuggestionMatch {
+                    text: "survival".into(),
+                    tooltip: None,
+                },
+                CommandSuggestionMatch {
+                    text: "creative".into(),
+                    tooltip: Some(NbtTag::String("Creative mode".into())),
+                },
+            ],
+        };
+        buf.clear();
+        encode_packet(&resp, &mut buf).unwrap();
+        let decoded_resp: CommandSuggestions = decode_frame(&mut buf, 4096)
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        assert_eq!(decoded_resp, resp);
     }
 
     #[test]

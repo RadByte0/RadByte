@@ -49,7 +49,7 @@ fn main() {
         }
     }
 
-    let cfg_path = resolve_config_path("radproxy.toml");
+    let cfg_path = resolve_config_path("rad.properties");
     let config = match ProxyConfig::load_or_create(&cfg_path) {
         Ok(cfg) => cfg,
         Err(err) => {

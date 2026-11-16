@@ -1,4 +1,4 @@
-//! Configuration (`radlimbo.toml`) for `RadLimbo`.
+//! Configuration (`rad.properties`) for `RadLimbo`.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Current `limbo.toml` schema version.
+/// Current `rad.properties` schema version for `RadLimbo`.
 pub const LIMBO_CONFIG_VERSION: u32 = 1;
 
 /// Forwarding mode expected from the upstream proxy.
@@ -154,23 +154,216 @@ impl LimboConfig {
         })
     }
 
-    /// Loads `limbo.toml` from disk or writes defaults on first start.
+    /// Loads `rad.properties` from disk (migrating legacy `radlimbo.toml` if present) or writes defaults on first start.
     pub fn load_or_create(path: &Path) -> Result<Self, String> {
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+            let parsed: LimboConfigFile = toml::from_str(&raw)
+                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+            return Self::from_file_struct(parsed);
+        }
         if !path.exists() {
-            let defaults = LimboConfigFile::default();
-            let toml_text = toml::to_string_pretty(&defaults)
-                .map_err(|e| format!("failed to serialize default limbo.toml: {e}"))?;
-            std::fs::write(path, toml_text)
+            let legacy = path.with_file_name("radlimbo.toml");
+            let defaults = if legacy.exists() {
+                let raw = std::fs::read_to_string(&legacy)
+                    .map_err(|e| format!("failed to read {}: {e}", legacy.display()))?;
+                toml::from_str::<LimboConfigFile>(&raw)
+                    .map_err(|e| format!("failed to parse {}: {e}", legacy.display()))?
+            } else {
+                LimboConfigFile::default()
+            };
+            let props_text = write_limbo_properties(&defaults)?;
+            std::fs::write(path, props_text)
                 .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
             return Self::from_file_struct(defaults);
         }
 
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        let parsed: LimboConfigFile =
-            toml::from_str(&raw).map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        let parsed = read_limbo_properties(&raw)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
         Self::from_file_struct(parsed)
     }
+}
+
+fn write_limbo_properties(file: &LimboConfigFile) -> Result<String, String> {
+    let addr: SocketAddr = file
+        .bind_addr
+        .parse()
+        .map_err(|e| format!("invalid bind_addr '{}': {e}", file.bind_addr))?;
+    let forwarding = match file.forwarding_mode {
+        LimboForwardingMode::None => "none",
+        LimboForwardingMode::Legacy => "legacy",
+        LimboForwardingMode::BungeeGuard => "bungeeguard",
+        LimboForwardingMode::Modern => "modern",
+    };
+    let gamemode = match file.game_mode {
+        0 => "survival",
+        1 => "creative",
+        2 => "adventure",
+        _ => "spectator",
+    };
+    let mut out = String::new();
+    out.push_str("# RadLimbo Configuration (Minecraft 26.3 / protocol 777)\n");
+    out.push_str(&format!("config-version={}\n\n", file.config_version));
+    out.push_str("# Network and forwarding\n");
+    out.push_str(&format!("server-ip={}\n", addr.ip()));
+    out.push_str(&format!("server-port={}\n", addr.port()));
+    out.push_str(&format!("forwarding-mode={forwarding}\n"));
+    out.push_str(&format!("forwarding-secret={}\n\n", file.forwarding_secret));
+    out.push_str("# Status and waiting room gameplay\n");
+    out.push_str(&format!("motd={}\n", file.motd));
+    out.push_str(&format!("max-players={}\n", file.max_players));
+    out.push_str(&format!("view-distance={}\n", file.view_distance));
+    out.push_str(&format!("gamemode={gamemode}\n\n"));
+    out.push_str("# Spawn coordinates\n");
+    out.push_str(&format!("spawn-x={}\n", file.spawn_x));
+    out.push_str(&format!("spawn-y={}\n", file.spawn_y));
+    out.push_str(&format!("spawn-z={}\n\n", file.spawn_z));
+    out.push_str("# Messages and reconnect target\n");
+    out.push_str(&format!("brand={}\n", file.brand));
+    if let Some(ref welcome) = file.welcome_message {
+        out.push_str(&format!("welcome-message={welcome}\n"));
+    }
+    if let Some(ref reconnect) = file.reconnect_server {
+        out.push_str(&format!("reconnect-server={reconnect}\n"));
+    }
+    out.push_str(&format!(
+        "keep-alive-interval-secs={}\n",
+        file.keep_alive_interval_secs
+    ));
+    out.push_str(&format!("max-packet-size={}\n", file.max_packet_size));
+    Ok(out)
+}
+
+fn read_limbo_properties(raw: &str) -> Result<LimboConfigFile, String> {
+    let mut cfg = LimboConfigFile::default();
+    let mut server_ip: Option<String> = None;
+    let mut server_port: Option<u16> = None;
+    let mut explicit_bind: Option<String> = None;
+
+    for (idx, line) in raw.lines().enumerate() {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let (key, val) = line
+            .split_once('=')
+            .ok_or_else(|| format!("line {}: expected key=value", idx + 1))?;
+        let key = key.trim().replace('_', "-").to_ascii_lowercase();
+        let val = val.trim().trim_matches('"');
+        match key.as_str() {
+            "config-version" => {
+                cfg.config_version = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid config-version", idx + 1))?;
+            }
+            "bind-addr" | "bind-address" => {
+                explicit_bind = Some(val.to_owned());
+            }
+            "server-ip" => {
+                server_ip = Some(val.to_owned());
+            }
+            "server-port" => {
+                server_port = Some(
+                    val.parse()
+                        .map_err(|_| format!("line {}: invalid server-port", idx + 1))?,
+                );
+            }
+            "forwarding-mode" => {
+                cfg.forwarding_mode = match val.to_ascii_lowercase().as_str() {
+                    "none" => LimboForwardingMode::None,
+                    "legacy" => LimboForwardingMode::Legacy,
+                    "bungeeguard" => LimboForwardingMode::BungeeGuard,
+                    "modern" => LimboForwardingMode::Modern,
+                    _ => {
+                        return Err(format!("line {}: invalid forwarding-mode '{val}'", idx + 1));
+                    }
+                };
+            }
+            "forwarding-secret" => cfg.forwarding_secret = val.to_owned(),
+            "motd" => cfg.motd = val.to_owned(),
+            "max-players" => {
+                cfg.max_players = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid max-players", idx + 1))?;
+            }
+            "view-distance" => {
+                cfg.view_distance = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid view-distance", idx + 1))?;
+            }
+            "gamemode" | "game-mode" => {
+                cfg.game_mode = match val.to_ascii_lowercase().as_str() {
+                    "survival" | "0" => 0,
+                    "creative" | "1" => 1,
+                    "adventure" | "2" => 2,
+                    "spectator" | "3" => 3,
+                    _ => return Err(format!("line {}: invalid gamemode '{val}'", idx + 1)),
+                };
+            }
+            "spawn-x" => {
+                cfg.spawn_x = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid spawn-x", idx + 1))?;
+            }
+            "spawn-y" => {
+                cfg.spawn_y = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid spawn-y", idx + 1))?;
+            }
+            "spawn-z" => {
+                cfg.spawn_z = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid spawn-z", idx + 1))?;
+            }
+            "brand" => cfg.brand = val.to_owned(),
+            "welcome-message" => {
+                cfg.welcome_message = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.to_owned())
+                };
+            }
+            "reconnect-server" => {
+                cfg.reconnect_server = if val.is_empty() {
+                    None
+                } else {
+                    Some(val.to_owned())
+                };
+            }
+            "keep-alive-interval-secs" => {
+                cfg.keep_alive_interval_secs = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid keep-alive-interval-secs", idx + 1))?;
+            }
+            "max-packet-size" => {
+                cfg.max_packet_size = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid max-packet-size", idx + 1))?;
+            }
+            other => {
+                return Err(format!("line {}: unknown property '{other}'", idx + 1));
+            }
+        }
+    }
+
+    if let Some(bind) = explicit_bind {
+        cfg.bind_addr = bind;
+    } else if server_ip.is_some() || server_port.is_some() {
+        let default_addr: SocketAddr = cfg
+            .bind_addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:25566".parse().unwrap());
+        let ip = server_ip
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default_addr.ip().to_string());
+        let port = server_port.unwrap_or_else(|| default_addr.port());
+        cfg.bind_addr = format!("{ip}:{port}");
+    }
+
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -198,5 +391,16 @@ mod tests {
         assert_eq!(cfg.bind_addr, "127.0.0.1:25566".parse().unwrap());
         assert_eq!(cfg.forwarding_mode, LimboForwardingMode::None);
         assert_eq!(cfg.game_mode, 3);
+    }
+
+    #[test]
+    fn properties_round_trip_validates() {
+        let defaults = LimboConfigFile::default();
+        let props = write_limbo_properties(&defaults).unwrap();
+        let parsed = read_limbo_properties(&props).unwrap();
+        let cfg = LimboConfig::from_file_struct(parsed).unwrap();
+        assert_eq!(cfg.bind_addr, "127.0.0.1:25566".parse().unwrap());
+        assert_eq!(cfg.game_mode, 3);
+        assert_eq!(cfg.view_distance, 2);
     }
 }

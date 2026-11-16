@@ -1,6 +1,7 @@
 //! Play-state packet loop, movement validation, and world interactions.
 
 mod containers;
+mod mining;
 mod use_item_on;
 
 use super::play_helpers::{
@@ -8,6 +9,7 @@ use super::play_helpers::{
 };
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_play(
     stream: TcpStream,
     mut read_buf: BytesMut,
@@ -15,12 +17,16 @@ pub(super) async fn run_play(
     player_uuid: Uuid,
     username: String,
     properties: Vec<GameProfileProperty>,
+    client_view_distance: Option<i32>,
     state: Arc<ServerState>,
 ) {
     let cfg = &state.config;
+    let mut effective_view_distance = client_view_distance
+        .unwrap_or(cfg.view_distance)
+        .clamp(2, cfg.view_distance);
     let entity_id = state.next_entity_id.fetch_add(1, Ordering::Relaxed);
     let (mut reader, mut writer) = stream.into_split();
-    let (tx, mut rx, mut cancel_rx) = outbound_channel(1024, MAX_PLAYER_OUTBOUND_BYTES);
+    let (tx, mut rx, mut cancel_rx) = outbound_channel(4096, MAX_PLAYER_OUTBOUND_BYTES);
 
     let mut writer_cancel = cancel_rx.clone();
     let writer_tx = tx.clone();
@@ -90,7 +96,7 @@ pub(super) async fn run_play(
             "minecraft:the_end".into(),
         ],
         max_players: VarInt(cfg.max_players),
-        view_distance: VarInt(cfg.view_distance),
+        view_distance: VarInt(effective_view_distance),
         simulation_distance: VarInt(cfg.simulation_distance),
         reduced_debug_info: false,
         enable_respawn_screen: true,
@@ -101,7 +107,13 @@ pub(super) async fn run_play(
         game_mode: init_mode,
         previous_game_mode: -1,
         is_debug: false,
-        is_flat: true,
+        is_flat: !cfg.world_type.eq_ignore_ascii_case("seeded")
+            && !state
+                .world
+                .read()
+                .await
+                .world_dir()
+                .is_some_and(|d| d.join("dimensions").is_dir()),
         portal_cooldown: VarInt(0),
         sea_level: VarInt(64),
         online_mode: false,
@@ -113,7 +125,7 @@ pub(super) async fn run_play(
     }
     let _ = encode_packet(
         &SetChunkCacheRadius {
-            view_distance: VarInt(cfg.view_distance),
+            view_distance: VarInt(effective_view_distance),
         },
         &mut init_batch,
     );
@@ -202,14 +214,43 @@ pub(super) async fn run_play(
         },
         &mut init_batch,
     );
+    let _ = encode_packet(
+        &SynchronizePlayerPosition {
+            teleport_id: VarInt(1),
+            x: init_x,
+            y: init_y,
+            z: init_z,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+            yaw: init_yaw,
+            pitch: init_pitch,
+            flags: 0,
+        },
+        &mut init_batch,
+    );
 
     let _ = tx.try_send(init_batch.freeze());
 
     let mut loaded_chunks: HashSet<(i32, i32)> = HashSet::new();
+    let mut pending_outer_chunks: std::collections::VecDeque<(i32, i32)> =
+        std::collections::VecDeque::new();
     {
-        let coords = chunks_in_radius(spawn_cx, spawn_cz, cfg.view_distance);
-        for chunk_group in coords.chunks(4) {
-            let mut chunk_batch = BytesMut::with_capacity(4 * 4096);
+        let immediate_r = effective_view_distance.min(4);
+        let all_coords = chunks_in_radius(spawn_cx, spawn_cz, effective_view_distance);
+        let mut immediate_coords = Vec::new();
+        for (cx, cz) in all_coords {
+            if (cx - spawn_cx).abs().max((cz - spawn_cz).abs()) <= immediate_r {
+                immediate_coords.push((cx, cz));
+            } else {
+                pending_outer_chunks.push_back((cx, cz));
+            }
+        }
+        state
+            .ensure_chunks_extras_loaded(init_dim, &immediate_coords)
+            .await;
+        for chunk_group in immediate_coords.chunks(16) {
+            let mut chunk_batch = BytesMut::with_capacity(16 * 4096);
             let mut world = state.world.write().await;
             for &(cx, cz) in chunk_group {
                 let chunk_pkt = world.chunk_packet_in(init_dim, cx, cz);
@@ -232,21 +273,6 @@ pub(super) async fn run_play(
     }
 
     let mut post_batch = BytesMut::with_capacity(512);
-    let _ = encode_packet(
-        &SynchronizePlayerPosition {
-            teleport_id: VarInt(1),
-            x: init_x,
-            y: init_y,
-            z: init_z,
-            vx: 0.0,
-            vy: 0.0,
-            vz: 0.0,
-            yaw: init_yaw,
-            pitch: init_pitch,
-            flags: 0,
-        },
-        &mut post_batch,
-    );
     if let Some(ref msg) = cfg.welcome_message {
         let _ = encode_packet(
             &SystemChatMessage {
@@ -312,23 +338,36 @@ pub(super) async fn run_play(
     };
 
     {
+        let mut ent_batch = BytesMut::with_capacity(4096);
+        let max_chunk_dist = cfg.view_distance.max(1);
         let entities = state.entities.read().await;
         for mob in entities.mobs_in_dimension(init_dim) {
-            if let Ok(spawn_bytes) =
-                encode_to_bytes(&mob.to_spawn_packet_with(&state.registries.entities))
+            let mcx = (mob.x.floor() as i32).div_euclid(16);
+            let mcz = (mob.z.floor() as i32).div_euclid(16);
+            if (mcx - spawn_cx).abs() <= max_chunk_dist && (mcz - spawn_cz).abs() <= max_chunk_dist
             {
-                let _ = tx.try_send(spawn_bytes);
+                let _ = encode_packet(
+                    &mob.to_spawn_packet_with(&state.registries.entities),
+                    &mut ent_batch,
+                );
             }
         }
         for item in entities.dropped_items_in_dimension(init_dim) {
-            if let Ok(spawn_bytes) =
-                encode_to_bytes(&item.to_spawn_packet_with(&state.registries.entities))
+            let icx = (item.x.floor() as i32).div_euclid(16);
+            let icz = (item.z.floor() as i32).div_euclid(16);
+            if (icx - spawn_cx).abs() <= max_chunk_dist && (icz - spawn_cz).abs() <= max_chunk_dist
             {
-                let _ = tx.try_send(spawn_bytes);
+                let _ = encode_packet(
+                    &item.to_spawn_packet_with(&state.registries.entities),
+                    &mut ent_batch,
+                );
+                let _ = encode_packet(&item.to_metadata_packet(), &mut ent_batch);
             }
-            if let Ok(meta_bytes) = encode_to_bytes(&item.to_metadata_packet()) {
-                let _ = tx.try_send(meta_bytes);
-            }
+        }
+        drop(entities);
+        if !ent_batch.is_empty() && !tx.send_wait(ent_batch.freeze()).await {
+            writer_task.abort();
+            return;
         }
     }
 
@@ -450,12 +489,52 @@ pub(super) async fn run_play(
     let mut cur_cx = spawn_cx;
     let mut cur_cz = spawn_cz;
     let mut last_move_at = Instant::now();
-    let mut mining_target: Option<(BlockPos, Instant)> = None;
+    let mut mining_target = mining::MiningAttempt::default();
     let mut disconnect_reason = "unknown";
 
     loop {
+        if !pending_outer_chunks.is_empty() {
+            let mut batch_coords = Vec::with_capacity(16);
+            while batch_coords.len() < 16 {
+                let Some((cx, cz)) = pending_outer_chunks.pop_front() else {
+                    break;
+                };
+                if !loaded_chunks.contains(&(cx, cz))
+                    && (cx - cur_cx).abs().max((cz - cur_cz).abs()) <= effective_view_distance
+                {
+                    batch_coords.push((cx, cz));
+                }
+            }
+            if !batch_coords.is_empty() {
+                let active_dim = state
+                    .players
+                    .read()
+                    .await
+                    .get(&entity_id)
+                    .map_or(init_dim, |p| p.dimension);
+                state
+                    .ensure_chunks_extras_loaded(active_dim, &batch_coords)
+                    .await;
+                let mut chunk_batch = BytesMut::with_capacity(batch_coords.len() * 4096);
+                {
+                    let mut world = state.world.write().await;
+                    for &(cx, cz) in &batch_coords {
+                        let chunk_pkt = world.chunk_packet_in(active_dim, cx, cz);
+                        if encode_packet(&chunk_pkt, &mut chunk_batch).is_ok() {
+                            loaded_chunks.insert((cx, cz));
+                        }
+                    }
+                }
+                if !chunk_batch.is_empty() && !tx.send_wait(chunk_batch.freeze()).await {
+                    disconnect_reason = "outbound_closed_during_outer_chunks";
+                    break;
+                }
+            }
+        }
+
         let mut sync_pos_opt = None;
         let frame_opt = tokio::select! {
+            biased;
             _ = cancel_rx.wait_for(|&c| c) => {
                 disconnect_reason = "cancelled_or_write_failed";
                 break;
@@ -477,6 +556,9 @@ pub(super) async fn run_play(
                     disconnect_reason = "read_timeout";
                     break;
                 }
+            },
+            () = tokio::task::yield_now(), if !pending_outer_chunks.is_empty() => {
+                continue;
             }
         };
         if let Some(sync_pos) = sync_pos_opt {
@@ -551,6 +633,8 @@ pub(super) async fn run_play(
                         &mut cur_cz,
                         new_cx,
                         new_cz,
+                        effective_view_distance,
+                        false,
                     )
                     .await;
                     state
@@ -593,6 +677,7 @@ pub(super) async fn run_play(
                     Some((mv.x, mv.y, mv.z)),
                     None,
                     elapsed,
+                    effective_view_distance,
                 )
                 .await;
             }
@@ -615,6 +700,7 @@ pub(super) async fn run_play(
                     Some((mv.x, mv.y, mv.z)),
                     Some((mv.yaw, mv.pitch)),
                     elapsed,
+                    effective_view_distance,
                 )
                 .await;
             }
@@ -637,6 +723,7 @@ pub(super) async fn run_play(
                     None,
                     Some((mv.yaw, mv.pitch)),
                     elapsed,
+                    effective_view_distance,
                 )
                 .await;
             }
@@ -659,6 +746,40 @@ pub(super) async fn run_play(
                     None,
                     None,
                     elapsed,
+                    effective_view_distance,
+                )
+                .await;
+            }
+        } else if frame.id == 0x0E
+            && let Some(vd) = decode_client_view_distance(&frame.payload)
+        {
+            let new_vd = vd.clamp(2, cfg.view_distance);
+            if new_vd != effective_view_distance {
+                effective_view_distance = new_vd;
+                pending_outer_chunks.clear();
+                if let Ok(bytes) = encode_to_bytes(&SetChunkCacheRadius {
+                    view_distance: VarInt(effective_view_distance),
+                }) {
+                    let _ = tx.try_send(bytes);
+                }
+                let cur_dim = state
+                    .players
+                    .read()
+                    .await
+                    .get(&entity_id)
+                    .map_or(init_dim, |p| p.dimension);
+                let (target_cx, target_cz) = (cur_cx, cur_cz);
+                sync_player_chunks(
+                    &state,
+                    &tx,
+                    cur_dim,
+                    &mut loaded_chunks,
+                    &mut cur_cx,
+                    &mut cur_cz,
+                    target_cx,
+                    target_cz,
+                    effective_view_distance,
+                    true,
                 )
                 .await;
             }
@@ -972,22 +1093,97 @@ pub(super) async fn run_play(
                     let can_break = !dead && mode != 2 && mode != 3 && within_reach;
 
                     if action.status.0 == 1 {
-                        mining_target = None;
+                        mining_target.cancel();
                     } else if can_break {
-                        let should_break = if mode == 1 {
+                        let dim = state
+                            .players
+                            .read()
+                            .await
+                            .get(&entity_id)
+                            .map_or(crate::world::worldgen::DimensionId::Overworld, |p| {
+                                p.dimension
+                            });
+                        let current = state
+                            .world
+                            .write()
+                            .await
+                            .get_block_in(dim, pos.x, pos.y, pos.z);
+                        let packaged_block = state
+                            .version_package
+                            .block_name_by_state(current)
+                            .and_then(|name| state.version_package.block_by_name(name));
+                        let unbreakable =
+                            mode == 0
+                                && (packaged_block
+                                    .and_then(|block| block.mining.as_ref())
+                                    .is_some_and(|data| data.hardness < 0.0)
+                                    || state.registries.block_by_state(current).is_some_and(
+                                        |block| mining::survival_unbreakable(&block.name),
+                                    ));
+                        let held_item = {
+                            let inv = inventory.lock().unwrap();
+                            let index = crate::gameplay::inventory::HOTBAR_START_SLOT
+                                + usize::from(inv.selected_hotbar.min(8));
+                            inv.slots
+                                .get(index)
+                                .filter(|slot| slot.count > 0)
+                                .map(|slot| slot.item_id)
+                        };
+                        let block = state.registries.block_by_state(current);
+                        let block_id = block.as_ref().map_or(0, |entry| entry.block_id);
+                        let block_name = block.as_ref().map_or("", |entry| entry.name.as_str());
+                        let item_name =
+                            held_item.and_then(|id| state.registries.item_name_by_id(id));
+                        let minimum = packaged_block
+                            .and_then(|block| block.mining.as_ref())
+                            .and_then(|data| mining::packaged_duration(data, item_name))
+                            .unwrap_or_else(|| mining::minimum_duration(block_name, item_name));
+                        let should_break = if unbreakable {
+                            mining_target.cancel();
+                            false
+                        } else if mode == 1 {
                             action.status.0 == 0
                         } else if action.status.0 == 0 {
-                            mining_target = Some((pos, Instant::now()));
-                            false
+                            if minimum.is_zero() && current != 0 {
+                                mining_target.cancel();
+                                true
+                            } else {
+                                mining_target.start_block(pos, block_id, current, Instant::now());
+                                false
+                            }
                         } else {
-                            // Survival finish-digging (`status == 2`) requires matching start + min duration.
-                            let ok = mining_target.is_some_and(|(target_pos, started_at)| {
-                                target_pos == pos
-                                    && started_at.elapsed() >= Duration::from_millis(40)
-                            });
-                            mining_target = None;
-                            ok
+                            mining_target.finish_block(
+                                pos,
+                                block_id,
+                                current,
+                                Instant::now(),
+                                minimum,
+                            )
                         };
+
+                        // The client predicts a completed break. If the server rejects it,
+                        // restore the authoritative block before acknowledging the action.
+                        if !should_break && (action.status.0 == 2 || unbreakable) {
+                            let dim = state
+                                .players
+                                .read()
+                                .await
+                                .get(&entity_id)
+                                .map_or(crate::world::worldgen::DimensionId::Overworld, |p| {
+                                    p.dimension
+                                });
+                            let current = state
+                                .world
+                                .write()
+                                .await
+                                .get_block_in(dim, pos.x, pos.y, pos.z);
+                            if let Ok(bytes) = encode_to_bytes(&BlockUpdate {
+                                pos,
+                                block_state: VarInt(i32::from(current)),
+                            }) {
+                                let _ = tx.try_send(bytes);
+                            }
+                        }
 
                         if should_break {
                             let cur_dim = state
@@ -1061,10 +1257,35 @@ pub(super) async fn run_play(
                                             .entry(player_uuid)
                                             .or_default()
                                             .blocks_broken += 1;
-                                        if prev_state
-                                            == state.registries.blocks.furnace.default_state
-                                        {
-                                            state
+                                        let broken_name = state
+                                            .registries
+                                            .block_by_state(prev_state)
+                                            .map(|b| b.name.clone());
+                                        if matches!(
+                                            broken_name.as_deref(),
+                                            Some("minecraft:obsidian" | "minecraft:nether_portal")
+                                        ) {
+                                            let portal_clears = {
+                                                let mut world = state.world.write().await;
+                                                crate::world::portals::invalidate_broken_nether_portal(
+                                                    &mut world, cur_dim, pos.x, pos.y, pos.z,
+                                                )
+                                            };
+                                            for (px, py, pz, st) in portal_clears {
+                                                state
+                                                    .broadcast_in_dimension_except(
+                                                        cur_dim,
+                                                        &BlockUpdate {
+                                                            pos: BlockPos::new(px, py, pz),
+                                                            block_state: VarInt(i32::from(st)),
+                                                        },
+                                                        None,
+                                                    )
+                                                    .await;
+                                            }
+                                        }
+                                        if broken_name.as_deref() == Some("minecraft:furnace") {
+                                            let removed = state
                                                 .furnaces
                                                 .write()
                                                 .await
@@ -1074,10 +1295,38 @@ pub(super) async fn run_play(
                                             {
                                                 open_furnace_pos = None;
                                             }
+                                            if let Some(f) = removed {
+                                                let cur_tick =
+                                                    state.tick_count.load(Ordering::Relaxed);
+                                                for (item_id, count) in [
+                                                    (f.input_item, f.input_count),
+                                                    (f.fuel_item, f.fuel_count),
+                                                    (f.output_item, f.output_count),
+                                                ] {
+                                                    if item_id > 0 && count > 0 {
+                                                        let (drop_pos, drop_vel) =
+                                                            random_block_drop_spawn(
+                                                                pos, cur_tick, entity_id,
+                                                            );
+                                                        let _ = spawn_and_broadcast_dropped_item(
+                                                            &state,
+                                                            cur_dim,
+                                                            drop_pos,
+                                                            drop_vel,
+                                                            rad_core::packet::play::ItemStack {
+                                                                count,
+                                                                item_id,
+                                                                components: Default::default(),
+                                                            },
+                                                            10,
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
+                                            }
                                         }
-                                        if prev_state == state.registries.blocks.chest.default_state
-                                        {
-                                            state
+                                        if broken_name.as_deref() == Some("minecraft:chest") {
+                                            let removed = state
                                                 .containers
                                                 .write()
                                                 .await
@@ -1088,12 +1337,63 @@ pub(super) async fn run_play(
                                                 open_chest_pos = None;
                                                 open_furnace_pos = None;
                                             }
+                                            if let Some(slots) = removed {
+                                                let cur_tick =
+                                                    state.tick_count.load(Ordering::Relaxed);
+                                                for slot in slots {
+                                                    if slot.item_id > 0 && slot.count > 0 {
+                                                        let (drop_pos, drop_vel) =
+                                                            random_block_drop_spawn(
+                                                                pos, cur_tick, entity_id,
+                                                            );
+                                                        let _ = spawn_and_broadcast_dropped_item(
+                                                            &state,
+                                                            cur_dim,
+                                                            drop_pos,
+                                                            drop_vel,
+                                                            rad_core::packet::play::ItemStack {
+                                                                count: slot.count,
+                                                                item_id: slot.item_id,
+                                                                components: Default::default(),
+                                                            },
+                                                            10,
+                                                        )
+                                                        .await;
+                                                    }
+                                                }
+                                            }
                                         }
                                         if mode == 0
-                                            && inventory.lock().unwrap().give_block_drop(prev_state)
+                                            && packaged_block
+                                                .and_then(|block| block.mining.as_ref())
+                                                .and_then(|data| {
+                                                    mining::can_harvest(data, item_name)
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    mining::fallback_can_harvest(
+                                                        block_name, item_name,
+                                                    )
+                                                })
+                                            && let Some(item_id) =
+                                                crate::gameplay::inventory::block_state_to_item_id_with(
+                                                    prev_state,
+                                                    &state.registries,
+                                                )
                                         {
-                                            sync_player_inventory(
-                                                &state, entity_id, &inventory, &tx,
+                                            let cur_tick = state.tick_count.load(Ordering::Relaxed);
+                                            let (drop_pos, drop_vel) =
+                                                random_block_drop_spawn(pos, cur_tick, entity_id);
+                                            let _ = spawn_and_broadcast_dropped_item(
+                                                &state,
+                                                cur_dim,
+                                                drop_pos,
+                                                drop_vel,
+                                                rad_core::packet::play::ItemStack {
+                                                    count: 1,
+                                                    item_id,
+                                                    components: Default::default(),
+                                                },
+                                                10,
                                             )
                                             .await;
                                         }
@@ -1111,7 +1411,20 @@ pub(super) async fn run_play(
                                             .registries
                                             .block_by_state(prev_state)
                                             .map(|b| b.name.clone())
-                                            .filter(|n| n.ends_with("_door"))
+                                            .filter(|n| {
+                                                n.ends_with("_door")
+                                                    || matches!(
+                                                        n.as_str(),
+                                                        "minecraft:tall_grass"
+                                                            | "minecraft:large_fern"
+                                                            | "minecraft:sunflower"
+                                                            | "minecraft:lilac"
+                                                            | "minecraft:rose_bush"
+                                                            | "minecraft:peony"
+                                                            | "minecraft:pitcher_plant"
+                                                            | "minecraft:tall_seagrass"
+                                                    )
+                                            })
                                         {
                                             for other_y in [pos.y + 1, pos.y - 1] {
                                                 let other_state =
@@ -1160,6 +1473,46 @@ pub(super) async fn run_play(
                                                 }
                                             }
                                         }
+                                        if let Some((px, py, pz)) =
+                                            crate::world::sim::piston_partner_pos(
+                                                prev_state,
+                                                pos.x,
+                                                pos.y,
+                                                pos.z,
+                                                &state.registries,
+                                            )
+                                        {
+                                            let cleared = {
+                                                let mut world = state.world.write().await;
+                                                let partner_state =
+                                                    world.get_block_in(cur_dim, px, py, pz);
+                                                let is_piston_part = state
+                                                    .registries
+                                                    .block_by_state(partner_state)
+                                                    .is_some_and(|b| {
+                                                        matches!(
+                                                            b.name.as_str(),
+                                                            "minecraft:piston_head"
+                                                                | "minecraft:piston"
+                                                                | "minecraft:sticky_piston"
+                                                        )
+                                                    });
+                                                is_piston_part
+                                                    && world.set_block_in(cur_dim, px, py, pz, 0)
+                                            };
+                                            if cleared {
+                                                state
+                                                    .broadcast_in_dimension_except(
+                                                        cur_dim,
+                                                        &BlockUpdate {
+                                                            pos: BlockPos::new(px, py, pz),
+                                                            block_state: VarInt(0),
+                                                        },
+                                                        None,
+                                                    )
+                                                    .await;
+                                            }
+                                        }
                                         let rs_updates = {
                                             let mut world = state.world.write().await;
                                             state.world_sim.write().await.update_redstone_around_in(
@@ -1185,6 +1538,27 @@ pub(super) async fn run_play(
                                     }
                                 }
                             }
+                        }
+                    } else {
+                        mining_target.cancel();
+                        let dim = state
+                            .players
+                            .read()
+                            .await
+                            .get(&entity_id)
+                            .map_or(crate::world::worldgen::DimensionId::Overworld, |p| {
+                                p.dimension
+                            });
+                        let current = state
+                            .world
+                            .write()
+                            .await
+                            .get_block_in(dim, pos.x, pos.y, pos.z);
+                        if let Ok(bytes) = encode_to_bytes(&BlockUpdate {
+                            pos,
+                            block_state: VarInt(i32::from(current)),
+                        }) {
+                            let _ = tx.try_send(bytes);
                         }
                     }
 
@@ -1429,6 +1803,18 @@ pub(super) async fn run_play(
             && let Ok(cmd) = frame.decode_as::<ChatCommand>()
         {
             handle_server_command(&state, &tx, &username, &cmd.command, Some(&inventory)).await;
+        } else if frame.id == 0x08
+            && let Ok(command) = {
+                use rad_core::types::Decode as _;
+                let mut slice = frame.payload.as_ref();
+                String::decode(&mut slice)
+            }
+        {
+            handle_server_command(&state, &tx, &username, &command, Some(&inventory)).await;
+        } else if frame.id == CommandSuggestionsRequest::ID
+            && let Ok(req) = frame.decode_as::<CommandSuggestionsRequest>()
+        {
+            commands::handle_command_suggestions(&state, &tx, &username, &req).await;
         }
     }
 
@@ -1514,4 +1900,61 @@ pub(super) async fn run_play(
         .await;
     writer_task.abort();
     info!(%peer_addr, %username, reason = disconnect_reason, "player left RadServer");
+}
+
+/// Computes a Vanilla-like randomized spawn position and scatter velocity for a broken block drop.
+fn random_block_drop_spawn(pos: BlockPos, tick_count: u64, entity_id: i32) -> ([f64; 3], [f64; 3]) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0_u64, |d| d.subsec_nanos() as u64);
+    let mut seed = tick_count
+        ^ nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (i64::from(pos.x) as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+        ^ (i64::from(pos.y) as u64).wrapping_mul(0x94D0_49BB_1331_11EB)
+        ^ (i64::from(pos.z) as u64).wrapping_mul(0x517C_C1B7_2722_0A95)
+        ^ (i64::from(entity_id) as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+
+    let mut next_unit = || -> f64 {
+        seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        ((z >> 11) as f64) / ((1_u64 << 53) as f64)
+    };
+
+    let ox = (next_unit() - 0.5) * 0.5;
+    let oy = (next_unit() - 0.5) * 0.5;
+    let oz = (next_unit() - 0.5) * 0.5;
+    let vx = (next_unit() - 0.5) * 0.2;
+    let vy = 0.2;
+    let vz = (next_unit() - 0.5) * 0.2;
+
+    (
+        [
+            f64::from(pos.x) + 0.5 + ox,
+            f64::from(pos.y) + 0.5 + oy,
+            f64::from(pos.z) + 0.5 + oz,
+        ],
+        [vx, vy, vz],
+    )
+}
+
+#[cfg(test)]
+mod block_drop_tests {
+    use super::*;
+
+    #[test]
+    fn block_drop_spawn_stays_within_vanilla_scatter_bounds() {
+        let pos = BlockPos::new(10, 64, -5);
+        for tick in 0..32_u64 {
+            let (p, v) = random_block_drop_spawn(pos, tick, 1);
+            assert!((10.25..=10.75).contains(&p[0]));
+            assert!((64.25..=64.75).contains(&p[1]));
+            assert!((-4.75..=-4.25).contains(&p[2]));
+            assert!((-0.1..=0.1).contains(&v[0]));
+            assert!((v[1] - 0.2).abs() < f64::EPSILON);
+            assert!((-0.1..=0.1).contains(&v[2]));
+        }
+    }
 }

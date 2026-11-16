@@ -116,41 +116,23 @@ pub fn encode_brand_payload(brand: &str) -> Vec<u8> {
 /// Builds a [`DeclareCommands`] tree for `RadProxy`'s built-in commands.
 #[must_use]
 pub fn build_proxy_declare_commands(is_admin: bool) -> DeclareCommands {
-    let mut nodes = vec![CommandNode {
-        kind: CommandNodeKind::Root,
-        executable: false,
-        children: Vec::new(),
-    }];
+    let mut nodes = vec![CommandNode::root(Vec::new())];
 
     // /server [name]
     let server_idx = nodes.len() as i32;
     let server_arg_idx = server_idx + 1;
     nodes[0].children.push(VarInt(server_idx));
-    nodes.push(CommandNode {
-        kind: CommandNodeKind::Literal {
-            name: "server".into(),
-        },
-        executable: true,
-        children: vec![VarInt(server_arg_idx)],
-    });
-    nodes.push(CommandNode {
-        kind: CommandNodeKind::WordStringArg {
-            name: "name".into(),
-        },
-        executable: true,
-        children: vec![],
-    });
+    nodes.push(CommandNode::literal(
+        "server",
+        true,
+        vec![VarInt(server_arg_idx)],
+    ));
+    nodes.push(CommandNode::word_arg("name", true, vec![], None));
 
     // /glist
     let glist_idx = nodes.len() as i32;
     nodes[0].children.push(VarInt(glist_idx));
-    nodes.push(CommandNode {
-        kind: CommandNodeKind::Literal {
-            name: "glist".into(),
-        },
-        executable: true,
-        children: vec![],
-    });
+    nodes.push(CommandNode::literal("glist", true, vec![]));
 
     if is_admin {
         for (cmd, arg) in [
@@ -162,21 +144,17 @@ pub fn build_proxy_declare_commands(is_admin: bool) -> DeclareCommands {
             let cmd_idx = nodes.len() as i32;
             let arg_idx = cmd_idx + 1;
             nodes[0].children.push(VarInt(cmd_idx));
-            nodes.push(CommandNode {
-                kind: CommandNodeKind::Literal { name: cmd.into() },
-                executable: cmd == "radproxy",
-                children: vec![VarInt(arg_idx)],
-            });
-            let kind = if cmd == "alert" || cmd == "kick" {
-                CommandNodeKind::GreedyStringArg { name: arg.into() }
+            nodes.push(CommandNode::literal(
+                cmd,
+                cmd == "radproxy",
+                vec![VarInt(arg_idx)],
+            ));
+            let node = if cmd == "alert" || cmd == "kick" {
+                CommandNode::greedy_arg(arg, true, vec![], None)
             } else {
-                CommandNodeKind::WordStringArg { name: arg.into() }
+                CommandNode::word_arg(arg, true, vec![], None)
             };
-            nodes.push(CommandNode {
-                kind,
-                executable: true,
-                children: vec![],
-            });
+            nodes.push(node);
         }
 
         // /send <player|all> <server>
@@ -184,27 +162,18 @@ pub fn build_proxy_declare_commands(is_admin: bool) -> DeclareCommands {
         let send_target_idx = send_idx + 1;
         let send_srv_idx = send_idx + 2;
         nodes[0].children.push(VarInt(send_idx));
-        nodes.push(CommandNode {
-            kind: CommandNodeKind::Literal {
-                name: "send".into(),
-            },
-            executable: false,
-            children: vec![VarInt(send_target_idx)],
-        });
-        nodes.push(CommandNode {
-            kind: CommandNodeKind::WordStringArg {
-                name: "target".into(),
-            },
-            executable: false,
-            children: vec![VarInt(send_srv_idx)],
-        });
-        nodes.push(CommandNode {
-            kind: CommandNodeKind::WordStringArg {
-                name: "server".into(),
-            },
-            executable: true,
-            children: vec![],
-        });
+        nodes.push(CommandNode::literal(
+            "send",
+            false,
+            vec![VarInt(send_target_idx)],
+        ));
+        nodes.push(CommandNode::word_arg(
+            "target",
+            false,
+            vec![VarInt(send_srv_idx)],
+            None,
+        ));
+        nodes.push(CommandNode::word_arg("server", true, vec![], None));
     }
 
     DeclareCommands {
@@ -317,25 +286,9 @@ mod tests {
     fn merges_backend_and_proxy_declare_commands_preserving_non_colliding() {
         let backend = DeclareCommands {
             nodes: vec![
-                CommandNode {
-                    kind: CommandNodeKind::Root,
-                    executable: false,
-                    children: vec![VarInt(1), VarInt(2)],
-                },
-                CommandNode {
-                    kind: CommandNodeKind::Literal {
-                        name: "help".into(),
-                    },
-                    executable: true,
-                    children: vec![],
-                },
-                CommandNode {
-                    kind: CommandNodeKind::Literal {
-                        name: "server".into(),
-                    },
-                    executable: true,
-                    children: vec![],
-                },
+                CommandNode::root(vec![VarInt(1), VarInt(2)]),
+                CommandNode::literal("help", true, vec![]),
+                CommandNode::literal("server", true, vec![]),
             ],
             root_index: VarInt(0),
         };

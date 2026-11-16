@@ -2,6 +2,7 @@
 
 mod access;
 mod commands;
+mod fallback_tags;
 mod login;
 mod play;
 mod play_helpers;
@@ -46,14 +47,15 @@ use rad_core::packet::login::{
 };
 use rad_core::packet::play::{
     AcknowledgeBlockChange, Attack, BlockUpdate, ChatCommand, ClientCommand, CommandNode,
-    CommandNodeKind, ConfirmTeleportation, ContainerClick, ContainerClose, DeclareCommands,
-    GameEvent, HurtAnimation, KeepAliveClientbound, KeepAliveServerbound, MoveEntityPosRot,
-    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, OpenScreen,
-    PlayClientboundPluginMessage, PlayDisconnect, PlayLogin, PlayerAction, PlayerInfoAddEntry,
-    PlayerInfoRemove, PlayerInfoUpdate, RemoveEntities, Respawn, RotateHead, ServerboundChat,
-    SetCarriedItem, SetChunkCacheCenter, SetChunkCacheRadius, SetCreativeModeSlot,
-    SetDefaultSpawnPosition, SetEntityMotion, SetHealth, SetHeldSlot, SpawnEntity,
-    SynchronizePlayerPosition, SystemChatMessage, UnloadChunk, UseItem, UseItemOn,
+    CommandSuggestionMatch, CommandSuggestions, CommandSuggestionsRequest, ConfirmTeleportation,
+    ContainerClick, ContainerClose, DeclareCommands, GameEvent, HurtAnimation,
+    KeepAliveClientbound, KeepAliveServerbound, MoveEntityPosRot, MovePlayerPos, MovePlayerPosRot,
+    MovePlayerRot, MovePlayerStatusOnly, OpenScreen, PlayClientboundPluginMessage, PlayDisconnect,
+    PlayLogin, PlayerAction, PlayerInfoAddEntry, PlayerInfoRemove, PlayerInfoUpdate,
+    RemoveEntities, Respawn, RotateHead, ServerboundChat, SetCarriedItem, SetChunkCacheCenter,
+    SetChunkCacheRadius, SetCreativeModeSlot, SetDefaultSpawnPosition, SetEntityMotion, SetHealth,
+    SetHeldSlot, SpawnEntity, SynchronizePlayerPosition, SystemChatMessage, UnloadChunk, UseItem,
+    UseItemOn,
 };
 use rad_core::packet::status::{PingRequest, PongResponse, StatusRequest, StatusResponse};
 use rad_core::state::ConnectionState;
@@ -179,8 +181,8 @@ pub struct PlayerSession {
     pub tx: OutboundSender,
 }
 
-/// Default per-player outbound byte budget (16 MiB, accommodates initial chunk bursts).
-pub const MAX_PLAYER_OUTBOUND_BYTES: usize = 16 * 1024 * 1024;
+/// Default per-player outbound byte budget (64 MiB, accommodates high view-distance chunk bursts).
+pub const MAX_PLAYER_OUTBOUND_BYTES: usize = 64 * 1024 * 1024;
 
 /// Bounded, byte-budgeted outbound packet sender with unified session cancellation.
 #[derive(Clone)]
@@ -361,6 +363,10 @@ pub struct ServerState {
     pub last_tick_us: AtomicU64,
     /// Active players keyed by `entity_id`.
     pub players: RwLock<HashMap<i32, PlayerSession>>,
+    /// Per-player `(portal_ticks, portal_cooldown_ticks)` for Nether/End portal transitions.
+    pub portal_state: RwLock<HashMap<i32, (u16, u16)>>,
+    /// Chunks whose `block_entities`, `block_ticks`, and `entities` have already been lazily loaded from `.mca`.
+    pub loaded_extra_chunks: RwLock<HashSet<(crate::world::worldgen::DimensionId, i32, i32)>>,
     /// Live player inventories keyed by `entity_id` for atomic item pickups.
     pub live_inventories:
         RwLock<HashMap<i32, Arc<std::sync::Mutex<crate::gameplay::inventory::PlayerInventory>>>>,
@@ -428,14 +434,29 @@ impl ServerState {
         );
         if let Some(dir) = world_dir.as_deref()
             && dir.exists()
-            && let Ok(report) =
-                crate::world::migrate::migrate_legacy_world_with(dir, false, &registries.items)
         {
-            for q in &report.quarantined_records {
-                tracing::warn!(quarantine = %q, "legacy world migration quarantined ambiguous entry");
+            if dir.join("legacy_block_states.json").exists()
+                && let Ok(report) =
+                    crate::world::migrate::migrate_legacy_world_with(dir, false, &registries.items)
+            {
+                for q in &report.quarantined_records {
+                    tracing::warn!(quarantine = %q, "legacy world migration quarantined ambiguous entry");
+                }
+            }
+            for legacy_file in ["radbyte_world_profile.json", "schema_version.json"] {
+                let p = dir.join(legacy_file);
+                if p.exists() {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            for legacy_empty_dir in ["playerdata", "backups"] {
+                let d = dir.join(legacy_empty_dir);
+                if d.is_dir() {
+                    let _ = std::fs::remove_dir(d);
+                }
             }
         }
-        let containers = world_dir
+        let mut containers = world_dir
             .as_deref()
             .map(crate::world::containers::ContainerStore::load_from_dir)
             .unwrap_or_default();
@@ -455,41 +476,82 @@ impl ServerState {
             level_meta.random_seed = config.world_seed;
         }
         level_meta.game_type = i32::from(config.game_mode);
-        let furnaces = world_dir
+        let mut furnaces = world_dir
             .as_deref()
             .map(crate::world::sim::FurnaceStore::load_from_dir)
             .unwrap_or_default();
-        let world_sim = world_dir
+        let mut world_sim = world_dir
             .as_deref()
             .map(crate::world::sim::WorldSim::load_from_dir)
             .unwrap_or_default();
+        let mut entity_mgr = EntityManager::new();
+        let mut loaded_extra_chunks = HashSet::new();
+        let mut next_eid = 10_000_i32;
+        if let Some(dir) = world_dir.as_deref() {
+            let spawn_cx = level_meta.spawn_x.div_euclid(16);
+            let spawn_cz = level_meta.spawn_z.div_euclid(16);
+            let preload_r = config.simulation_distance.clamp(1, 6);
+            for (cx, cz) in crate::world::chunks_in_radius(spawn_cx, spawn_cz, preload_r) {
+                loaded_extra_chunks.insert((
+                    crate::world::worldgen::DimensionId::Overworld,
+                    cx,
+                    cz,
+                ));
+                let (bes, ticks) =
+                    crate::world::WorldState::load_chunk_block_entities_and_ticks_from_mca(
+                        dir,
+                        crate::world::worldgen::DimensionId::Overworld,
+                        cx,
+                        cz,
+                    );
+                apply_block_entities_to_stores(bes, &registries, &mut containers, &mut furnaces);
+                apply_block_ticks_to_sim(ticks, &mut world_sim);
+                let (items, mobs) = crate::gameplay::entity::load_entities_in_chunk_from_mca(
+                    dir,
+                    crate::world::worldgen::DimensionId::Overworld,
+                    cx,
+                    cz,
+                    &mut next_eid,
+                    &registries,
+                );
+                for item in items {
+                    entity_mgr.insert_dropped_item(item);
+                }
+                for mob in mobs {
+                    entity_mgr.insert_mob(mob);
+                }
+            }
+        }
         let recipes = world_dir
             .as_deref()
             .map(crate::gameplay::inventory::load_custom_recipes_from_dir)
             .unwrap_or_default();
-        let loaded_items = world_dir
+        let is_vanilla_3d_world = world_dir
             .as_deref()
-            .map(crate::gameplay::entity::load_dropped_items_from_dir)
-            .unwrap_or_default();
-        let max_item_eid = loaded_items.iter().map(|i| i.entity_id).max().unwrap_or(0);
-        let mut entity_mgr = EntityManager::new();
-        for item in loaded_items {
-            entity_mgr.insert_dropped_item(item);
-        }
-        let generator = if config.world_type.eq_ignore_ascii_case("seeded") {
-            crate::world::worldgen::WorldGenerator::Seeded(config.world_seed)
+            .is_some_and(|dir| dir.join("dimensions").is_dir());
+        let generator = if config.world_type.eq_ignore_ascii_case("seeded") || is_vanilla_3d_world {
+            let seed = if level_meta.random_seed != 0 {
+                level_meta.random_seed
+            } else if config.world_seed != 0 {
+                config.world_seed
+            } else {
+                0x5EED_2603_i64
+            };
+            crate::world::worldgen::WorldGenerator::Seeded(seed)
         } else {
             crate::world::worldgen::WorldGenerator::Flat
         };
         Self {
             config,
             server_session_id: Uuid::new_v3(&Uuid::NAMESPACE_OID, boot_seed.as_bytes()),
-            next_entity_id: AtomicI32::new(max_item_eid.saturating_add(1).max(1)),
+            next_entity_id: AtomicI32::new(next_eid.max(1)),
             tick_count: AtomicU64::new(0),
             last_saved_tick: AtomicU64::new(0),
             save_mutex: tokio::sync::Mutex::new(()),
             last_tick_us: AtomicU64::new(0),
             players: RwLock::new(HashMap::new()),
+            portal_state: RwLock::new(HashMap::new()),
+            loaded_extra_chunks: RwLock::new(loaded_extra_chunks),
             live_inventories: RwLock::new(HashMap::new()),
             world: RwLock::new(
                 WorldState::new_with_registries(world_dir, Arc::clone(&registries))
@@ -641,10 +703,92 @@ impl ServerState {
     }
 
     /// Switches `entity_id` to `target_dim`, sending `Respawn`, new chunks, and updating visibility.
+    /// Lazily loads `block_entities`, `block_ticks`, and `entities` for any unvisited chunks in `coords`.
+    pub async fn ensure_chunks_extras_loaded(
+        &self,
+        dim: crate::world::worldgen::DimensionId,
+        coords: &[(i32, i32)],
+    ) {
+        let Some(world_dir) = self.world.read().await.world_dir().map(PathBuf::from) else {
+            return;
+        };
+        let to_load: Vec<(i32, i32)> = {
+            let mut loaded = self.loaded_extra_chunks.write().await;
+            coords
+                .iter()
+                .copied()
+                .filter(|&(cx, cz)| loaded.insert((dim, cx, cz)))
+                .collect()
+        };
+        if to_load.is_empty() {
+            return;
+        }
+        let mut all_bes = Vec::new();
+        let mut all_ticks = Vec::new();
+        let mut all_items = Vec::new();
+        let mut all_mobs = Vec::new();
+        let mut tmp_eid = 1_i32;
+        for (cx, cz) in to_load {
+            let (bes, ticks) =
+                crate::world::WorldState::load_chunk_block_entities_and_ticks_from_mca(
+                    &world_dir, dim, cx, cz,
+                );
+            all_bes.extend(bes);
+            all_ticks.extend(ticks);
+            let (items, mobs) = crate::gameplay::entity::load_entities_in_chunk_from_mca(
+                &world_dir,
+                dim,
+                cx,
+                cz,
+                &mut tmp_eid,
+                &self.registries,
+            );
+            all_items.extend(items);
+            all_mobs.extend(mobs);
+        }
+        if !all_bes.is_empty() {
+            let mut containers = self.containers.write().await;
+            let mut furnaces = self.furnaces.write().await;
+            apply_block_entities_to_stores(
+                all_bes,
+                &self.registries,
+                &mut containers,
+                &mut furnaces,
+            );
+        }
+        if !all_ticks.is_empty() {
+            let mut sim = self.world_sim.write().await;
+            apply_block_ticks_to_sim(all_ticks, &mut sim);
+        }
+        if !all_items.is_empty() || !all_mobs.is_empty() {
+            let mut entities = self.entities.write().await;
+            for mut item in all_items {
+                item.entity_id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+                entities.insert_dropped_item(item);
+            }
+            for mut mob in all_mobs {
+                mob.entity_id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
+                entities.insert_mob(mob);
+            }
+        }
+    }
+
+    /// Switches a player's active dimension at their current coordinates.
     pub async fn switch_player_dimension(
         &self,
         entity_id: i32,
         target_dim: crate::world::worldgen::DimensionId,
+    ) {
+        self.switch_player_dimension_at(entity_id, target_dim, None)
+            .await;
+    }
+
+    /// Switches a player's active dimension, optionally moving them to `target_pos`.
+    pub async fn switch_player_dimension_at(
+        &self,
+        entity_id: i32,
+        target_dim: crate::world::worldgen::DimensionId,
+        target_pos: Option<(f64, f64, f64)>,
     ) {
         let info = {
             let mut players = self.players.write().await;
@@ -657,6 +801,12 @@ impl ServerState {
             }
             p.dimension = target_dim;
             p.pending_teleport_id = Some(99);
+            if let Some((tx, ty, tz)) = target_pos {
+                p.x = tx;
+                p.y = ty;
+                p.z = tz;
+                p.fall_start_y = None;
+            }
             (
                 p.uuid,
                 p.username.clone(),
@@ -833,18 +983,59 @@ impl ServerState {
         .await;
     }
 
-    /// Loads persisted player data from `<world_dir>/playerdata/<uuid>.json`, if present.
+    /// Loads persisted player data from `<world_dir>/players/<uuid>.dat` (Vanilla 26.3 gzipped NBT),
+    /// falling back to legacy `playerdata/<uuid>.dat` or `playerdata/<uuid>.json` if present,
+    /// and merges `players/stats/<uuid>.json` when available.
     pub async fn load_player_data(&self, uuid: Uuid) -> Option<SavedPlayerData> {
         let dir = self.world.read().await.world_dir()?.to_path_buf();
-        let path = dir.join("playerdata").join(format!("{uuid}.json"));
-        let raw = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
-            .await
-            .ok()?
-            .ok()?;
-        serde_json::from_str(&raw).ok()
+        let registries = Arc::clone(&self.registries);
+        let players_data_dat = dir.join("players").join("data").join(format!("{uuid}.dat"));
+        let players_dat = dir.join("players").join(format!("{uuid}.dat"));
+        let legacy_dat = dir.join("playerdata").join(format!("{uuid}.dat"));
+        let legacy_json = dir.join("playerdata").join(format!("{uuid}.json"));
+        let stats_json = dir
+            .join("players")
+            .join("stats")
+            .join(format!("{uuid}.json"));
+        tokio::task::spawn_blocking(move || {
+            let mut loaded = None;
+            for dat_path in [&players_data_dat, &players_dat, &legacy_dat] {
+                if let Ok(compressed) = std::fs::read(dat_path) {
+                    use flate2::read::GzDecoder;
+                    use std::io::Read;
+                    let mut dec = GzDecoder::new(compressed.as_slice()).take(4 * 1024 * 1024);
+                    let mut raw = Vec::new();
+                    if dec.read_to_end(&mut raw).is_ok() {
+                        let mut cursor = raw.as_slice();
+                        if let Ok((_, root)) = rad_core::nbt::decode_named_nbt(&mut cursor)
+                            && let Some(parsed) = SavedPlayerData::from_nbt(&root, &registries)
+                        {
+                            loaded = Some(parsed);
+                            break;
+                        }
+                    }
+                }
+            }
+            if loaded.is_none()
+                && let Ok(raw) = std::fs::read_to_string(&legacy_json)
+            {
+                loaded = serde_json::from_str(&raw).ok();
+            }
+            if let Some(ref mut data) = loaded
+                && let Ok(raw_stats) = std::fs::read_to_string(&stats_json)
+                && let Ok(parsed_stats) = parse_vanilla_player_stats(&raw_stats)
+            {
+                data.stats = parsed_stats;
+            }
+            loaded
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
-    /// Atomically saves a single player's state to `<world_dir>/playerdata/<uuid>.json`, serialized via `save_mutex`.
+    /// Atomically saves a single player's state to `<world_dir>/players/<uuid>.dat`
+    /// and `<world_dir>/players/stats/<uuid>.json`, serialized via `save_mutex`.
     pub async fn save_player_data(
         &self,
         uuid: Uuid,
@@ -868,19 +1059,63 @@ impl ServerState {
         else {
             return Ok(());
         };
-        let json = serde_json::to_string_pretty(data)
+        let nbt_tag = data.to_nbt(&self.registries);
+        let mut nbt_bytes = BytesMut::new();
+        rad_core::nbt::encode_named_nbt("", &nbt_tag, &mut nbt_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let data_version = rad_version::MC_26_3.world_data_version;
+        let stats_json_bytes = format_vanilla_player_stats(&data.stats)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         tokio::task::spawn_blocking(move || {
+            use flate2::Compression;
+            use flate2::write::GzEncoder;
             use std::io::Write;
-            let playerdata_dir = dir.join("playerdata");
-            std::fs::create_dir_all(&playerdata_dir)?;
-            let tmp_path = playerdata_dir.join(format!("{uuid}.json.{}", unique_tmp_suffix()));
-            let final_path = playerdata_dir.join(format!("{uuid}.json"));
+            let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+            enc.write_all(&nbt_bytes)?;
+            let gz = enc.finish()?;
+
+            let players_dir = dir.join("players");
+            let dat_dir = if players_dir.join("data").exists()
+                || dir.join("dimensions").join("minecraft").exists()
+            {
+                players_dir.join("data")
+            } else {
+                players_dir.clone()
+            };
+            std::fs::create_dir_all(&dat_dir)?;
+            let tmp_path = dat_dir.join(format!("{uuid}.dat.{}", unique_tmp_suffix()));
+            let final_path = dat_dir.join(format!("{uuid}.dat"));
             let mut file = std::fs::File::create(&tmp_path)?;
-            file.write_all(json.as_bytes())?;
+            file.write_all(&gz)?;
             file.sync_all()?;
             drop(file);
             std::fs::rename(&tmp_path, &final_path)?;
+
+            let stats_dir = players_dir.join("stats");
+            std::fs::create_dir_all(&stats_dir)?;
+            let stats_tmp = stats_dir.join(format!("{uuid}.json.{}", unique_tmp_suffix()));
+            let stats_final = stats_dir.join(format!("{uuid}.json"));
+            std::fs::write(&stats_tmp, stats_json_bytes)?;
+            std::fs::rename(&stats_tmp, &stats_final)?;
+
+            let adv_dir = players_dir.join("advancements");
+            std::fs::create_dir_all(&adv_dir)?;
+            let adv_final = adv_dir.join(format!("{uuid}.json"));
+            if !adv_final.exists() {
+                let adv_tmp = adv_dir.join(format!("{uuid}.json.{}", unique_tmp_suffix()));
+                let adv_json = format!("{{\"DataVersion\":{data_version}}}");
+                std::fs::write(&adv_tmp, adv_json)?;
+                std::fs::rename(&adv_tmp, &adv_final)?;
+            }
+
+            for legacy in [
+                dir.join("playerdata").join(format!("{uuid}.dat")),
+                dir.join("playerdata").join(format!("{uuid}.json")),
+            ] {
+                if legacy.exists() {
+                    let _ = std::fs::remove_file(&legacy);
+                }
+            }
             Ok(())
         })
         .await
@@ -937,6 +1172,32 @@ impl ServerState {
             self.save_player_data_unlocked(uuid, &data).await?;
         }
 
+        let c_rev = {
+            let containers = self.containers.read().await;
+            containers.snapshot_if_dirty()?.map(|(rev, _)| rev)
+        };
+        let f_rev = {
+            let furnaces = self.furnaces.read().await;
+            furnaces.snapshot_if_dirty().map(|(rev, _)| rev)
+        };
+        let cur_tick = self.tick_count.load(Ordering::Relaxed);
+        let s_rev = {
+            let sim = self.world_sim.read().await;
+            sim.snapshot_if_dirty(cur_tick).map(|(rev, _)| rev)
+        };
+        if c_rev.is_some() || f_rev.is_some() || s_rev.is_some() {
+            let containers = self.containers.read().await;
+            let furnaces = self.furnaces.read().await;
+            let sim = self.world_sim.read().await;
+            let mut world = self.world.write().await;
+            if c_rev.is_some() || f_rev.is_some() {
+                sync_block_entities_to_world(&mut world, &containers, &furnaces, &self.registries);
+            }
+            if s_rev.is_some() {
+                sync_block_ticks_to_world(&mut world, &sim, &self.registries, cur_tick);
+            }
+        }
+
         let (world_dir, dirty) = {
             let world = self.world.read().await;
             let Some(dir) = world.world_dir().map(std::path::Path::to_path_buf) else {
@@ -945,21 +1206,12 @@ impl ServerState {
             (dir, world.snapshot_dirty_chunks()?)
         };
 
-        let container_snap = {
-            let containers = self.containers.read().await;
-            containers.snapshot_if_dirty()?
-        };
-        if let Some((c_rev, container_snap)) = container_snap {
-            let cdir = world_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::world::containers::ContainerStore::write_snapshot_atomic(
-                    &cdir,
-                    &container_snap,
-                )
-            })
-            .await
-            .map_err(|e| std::io::Error::other(format!("container save task failed: {e}")))??;
-            self.containers.write().await.mark_saved(c_rev);
+        if let Some(rev) = c_rev {
+            self.containers.write().await.mark_saved(rev);
+            let legacy_containers = world_dir.join("containers.json");
+            if legacy_containers.exists() {
+                let _ = std::fs::remove_file(legacy_containers);
+            }
         }
 
         let access_snap = {
@@ -983,44 +1235,41 @@ impl ServerState {
             .await
             .map_err(|e| std::io::Error::other(format!("level.dat save task failed: {e}")))??;
 
-        let furnace_snap = {
-            let furnaces = self.furnaces.read().await;
-            furnaces.snapshot_if_dirty()
-        };
-        if let Some((f_rev, furnace_snap)) = furnace_snap {
-            let fdir = world_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::world::sim::FurnaceStore::write_snapshot_atomic(&fdir, &furnace_snap)
-            })
-            .await
-            .map_err(|e| std::io::Error::other(format!("furnaces save task failed: {e}")))??;
-            self.furnaces.write().await.mark_saved(f_rev);
+        if let Some(rev) = f_rev {
+            self.furnaces.write().await.mark_saved(rev);
+            let legacy_furnaces = world_dir.join("furnaces.json");
+            if legacy_furnaces.exists() {
+                let _ = std::fs::remove_file(legacy_furnaces);
+            }
         }
 
-        let sim_snap = {
-            let sim = self.world_sim.read().await;
-            sim.snapshot_if_dirty(self.tick_count.load(Ordering::Relaxed))
-        };
-        if let Some((s_rev, sim_snap)) = sim_snap {
-            let sdir = world_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::world::sim::WorldSim::write_snapshot_atomic(&sdir, &sim_snap)
-            })
-            .await
-            .map_err(|e| std::io::Error::other(format!("sim_queue save task failed: {e}")))??;
-            self.world_sim.write().await.mark_saved(s_rev);
+        if let Some(rev) = s_rev {
+            self.world_sim.write().await.mark_saved(rev);
+            let legacy_sim = world_dir.join("sim_queue.json");
+            if legacy_sim.exists() {
+                let _ = std::fs::remove_file(legacy_sim);
+            }
         }
 
-        let item_snap: Vec<crate::gameplay::entity::DroppedItemEntity> = {
+        let (item_snap, mob_snap): (
+            Vec<crate::gameplay::entity::DroppedItemEntity>,
+            Vec<crate::gameplay::entity::MobEntity>,
+        ) = {
             let entities = self.entities.read().await;
-            entities.all_dropped_items().cloned().collect()
+            (
+                entities.all_dropped_items().cloned().collect(),
+                entities.all_mobs().cloned().collect(),
+            )
         };
         let idir = world_dir.clone();
+        let regs = Arc::clone(&self.registries);
         tokio::task::spawn_blocking(move || {
-            crate::gameplay::entity::write_dropped_items_atomic(&idir, &item_snap)
+            crate::gameplay::entity::write_entities_to_world_mca(
+                &idir, &item_snap, &mob_snap, &regs,
+            )
         })
         .await
-        .map_err(|e| std::io::Error::other(format!("dropped_items save task failed: {e}")))??;
+        .map_err(|e| std::io::Error::other(format!("entities save task failed: {e}")))??;
 
         if dirty.is_empty() {
             return Ok(0);
@@ -1159,7 +1408,7 @@ pub struct SavedSlot {
     pub components: rad_core::packet::play::ItemComponentPatch,
 }
 
-/// Serializable per-player state persisted under `world/playerdata/<uuid>.json`.
+/// Serializable per-player state persisted under `world/playerdata/<uuid>.dat`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedPlayerData {
     /// World X coordinate.
@@ -1192,6 +1441,265 @@ pub struct SavedPlayerData {
     /// Tracked gameplay statistics for this player.
     #[serde(default)]
     pub stats: PlayerStats,
+}
+
+impl SavedPlayerData {
+    /// Encodes player state into Vanilla-compatible NBT (`playerdata/<uuid>.dat`).
+    #[must_use]
+    pub fn to_nbt(&self, registries: &crate::registries::Version26_3Registries) -> NbtTag {
+        let mut root = std::collections::BTreeMap::new();
+        root.insert("DataVersion".to_owned(), NbtTag::Int(4790));
+        root.insert(
+            "Pos".to_owned(),
+            NbtTag::List(vec![
+                NbtTag::Double(self.x),
+                NbtTag::Double(self.y),
+                NbtTag::Double(self.z),
+            ]),
+        );
+        root.insert(
+            "Rotation".to_owned(),
+            NbtTag::List(vec![NbtTag::Float(self.yaw), NbtTag::Float(self.pitch)]),
+        );
+        root.insert("Health".to_owned(), NbtTag::Float(self.hp));
+        root.insert("foodLevel".to_owned(), NbtTag::Int(self.food));
+        root.insert(
+            "foodSaturationLevel".to_owned(),
+            NbtTag::Float(self.saturation),
+        );
+        root.insert(
+            "playerGameType".to_owned(),
+            NbtTag::Int(i32::from(self.game_mode)),
+        );
+        root.insert(
+            "SelectedItemSlot".to_owned(),
+            NbtTag::Int(i32::from(self.selected_hotbar)),
+        );
+        root.insert(
+            "Dimension".to_owned(),
+            NbtTag::String(self.dimension.resource_name().to_owned()),
+        );
+
+        let inv_list: Vec<NbtTag> = self
+            .inventory
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.count > 0 && slot.item_id > 0)
+            .filter_map(|(idx, slot)| {
+                let vanilla_slot: i8 = match idx {
+                    36..=44 => (idx - 36) as i8,
+                    9..=35 => idx as i8,
+                    5 => 103,
+                    6 => 102,
+                    7 => 101,
+                    8 => 100,
+                    45 => -106,
+                    _ => return None,
+                };
+                let name = registries.item_name_by_id(slot.item_id)?;
+                let mut item = std::collections::BTreeMap::new();
+                item.insert("Slot".to_owned(), NbtTag::Byte(vanilla_slot));
+                item.insert("id".to_owned(), NbtTag::String(name.to_owned()));
+                item.insert("count".to_owned(), NbtTag::Int(slot.count.clamp(1, 64)));
+                if let Some(comp_tag) = encode_item_components_nbt(&slot.components) {
+                    item.insert("components".to_owned(), comp_tag);
+                }
+                Some(NbtTag::Compound(item))
+            })
+            .collect();
+        root.insert("Inventory".to_owned(), NbtTag::List(inv_list));
+
+        let mut stats_tag = std::collections::BTreeMap::new();
+        stats_tag.insert(
+            "blocks_broken".to_owned(),
+            NbtTag::Long(self.stats.blocks_broken as i64),
+        );
+        stats_tag.insert(
+            "blocks_placed".to_owned(),
+            NbtTag::Long(self.stats.blocks_placed as i64),
+        );
+        stats_tag.insert(
+            "mobs_killed".to_owned(),
+            NbtTag::Long(self.stats.mobs_killed as i64),
+        );
+        root.insert("rad_stats".to_owned(), NbtTag::Compound(stats_tag));
+
+        NbtTag::Compound(root)
+    }
+
+    /// Decodes player state from Vanilla-compatible NBT (`playerdata/<uuid>.dat`).
+    #[must_use]
+    pub fn from_nbt(
+        tag: &NbtTag,
+        registries: &crate::registries::Version26_3Registries,
+    ) -> Option<Self> {
+        let NbtTag::Compound(root) = tag else {
+            return None;
+        };
+        let (x, y, z) = match root.get("Pos") {
+            Some(NbtTag::List(vals)) if vals.len() == 3 => match (&vals[0], &vals[1], &vals[2]) {
+                (NbtTag::Double(x), NbtTag::Double(y), NbtTag::Double(z)) => (*x, *y, *z),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let (yaw, pitch) = match root.get("Rotation") {
+            Some(NbtTag::List(vals)) if vals.len() == 2 => match (&vals[0], &vals[1]) {
+                (NbtTag::Float(yaw), NbtTag::Float(pitch)) => (*yaw, *pitch),
+                _ => (0.0, 0.0),
+            },
+            _ => (0.0, 0.0),
+        };
+        let hp = match root.get("Health") {
+            Some(NbtTag::Float(v)) => *v,
+            _ => 20.0,
+        };
+        let food = match root.get("foodLevel") {
+            Some(NbtTag::Int(v)) => *v,
+            _ => 20,
+        };
+        let saturation = match root.get("foodSaturationLevel") {
+            Some(NbtTag::Float(v)) => *v,
+            _ => 5.0,
+        };
+        let game_mode = match root.get("playerGameType") {
+            Some(NbtTag::Int(v)) => (*v).clamp(0, 3) as u8,
+            _ => 0,
+        };
+        let selected_hotbar = match root.get("SelectedItemSlot") {
+            Some(NbtTag::Int(v)) => (*v).clamp(0, 8) as u8,
+            _ => 0,
+        };
+        let dimension = match root.get("Dimension") {
+            Some(NbtTag::String(s)) if s == "minecraft:the_nether" => {
+                crate::world::worldgen::DimensionId::Nether
+            }
+            Some(NbtTag::String(s)) if s == "minecraft:the_end" => {
+                crate::world::worldgen::DimensionId::End
+            }
+            _ => crate::world::worldgen::DimensionId::Overworld,
+        };
+
+        let mut inventory =
+            vec![SavedSlot::default(); crate::gameplay::inventory::PLAYER_INVENTORY_SLOTS];
+        if let Some(NbtTag::List(items)) = root.get("Inventory") {
+            for entry in items {
+                let NbtTag::Compound(map) = entry else {
+                    continue;
+                };
+                let Some(NbtTag::Byte(slot_idx)) = map.get("Slot") else {
+                    continue;
+                };
+                let idx = match *slot_idx {
+                    0..=8 => 36 + (*slot_idx as usize),
+                    9..=35 => *slot_idx as usize,
+                    103 => 5,
+                    102 => 6,
+                    101 => 7,
+                    100 => 8,
+                    -106 => 45,
+                    _ => continue,
+                };
+                if idx >= inventory.len() {
+                    continue;
+                }
+                let Some(NbtTag::String(id_name)) = map.get("id") else {
+                    continue;
+                };
+                let Some(item_id) = registries.item_by_name(id_name) else {
+                    continue;
+                };
+                let count = match map.get("count").or_else(|| map.get("Count")) {
+                    Some(NbtTag::Int(c)) => (*c).clamp(1, 64),
+                    Some(NbtTag::Byte(c)) => i32::from(*c).clamp(1, 64),
+                    _ => 1,
+                };
+                let components = decode_item_components_nbt(map);
+                inventory[idx] = SavedSlot {
+                    count,
+                    item_id,
+                    components,
+                };
+            }
+        }
+
+        let stats = match root.get("rad_stats") {
+            Some(NbtTag::Compound(st)) => PlayerStats {
+                blocks_broken: match st.get("blocks_broken") {
+                    Some(NbtTag::Long(v)) => (*v).max(0) as u64,
+                    _ => 0,
+                },
+                blocks_placed: match st.get("blocks_placed") {
+                    Some(NbtTag::Long(v)) => (*v).max(0) as u64,
+                    _ => 0,
+                },
+                mobs_killed: match st.get("mobs_killed") {
+                    Some(NbtTag::Long(v)) => (*v).max(0) as u64,
+                    _ => 0,
+                },
+            },
+            _ => PlayerStats::default(),
+        };
+
+        Some(Self {
+            x,
+            y,
+            z,
+            yaw,
+            pitch,
+            hp,
+            food,
+            saturation,
+            game_mode,
+            inventory,
+            selected_hotbar,
+            dimension,
+            stats,
+        })
+    }
+}
+
+fn format_vanilla_player_stats(stats: &PlayerStats) -> serde_json::Result<String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "stats": {
+            "minecraft:custom": {
+                "radbyte:blocks_broken": stats.blocks_broken,
+                "radbyte:blocks_placed": stats.blocks_placed,
+                "radbyte:mobs_killed": stats.mobs_killed
+            }
+        },
+        "DataVersion": 4790
+    }))
+}
+
+fn parse_vanilla_player_stats(raw: &str) -> serde_json::Result<PlayerStats> {
+    let val: serde_json::Value = serde_json::from_str(raw)?;
+    let custom = val
+        .get("stats")
+        .and_then(|s| s.get("minecraft:custom"))
+        .and_then(|c| c.as_object());
+    Ok(PlayerStats {
+        blocks_broken: custom
+            .and_then(|c| c.get("radbyte:blocks_broken"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        blocks_placed: custom
+            .and_then(|c| c.get("radbyte:blocks_placed"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        mobs_killed: custom
+            .and_then(|c| c.get("radbyte:mobs_killed"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    })
+}
+
+pub(super) fn decode_client_view_distance(payload: &[u8]) -> Option<i32> {
+    use rad_core::types::Decode as _;
+    let mut slice = payload;
+    let _locale = String::decode(&mut slice).ok()?;
+    let vd = u8::decode(&mut slice).ok()? as i8;
+    Some(i32::from(vd).clamp(2, 32))
 }
 
 /// Handles a single accepted TCP connection to `RadServer`.
@@ -1449,4 +1957,590 @@ pub(super) async fn read_typed_packet<P: Packet>(
 ) -> Option<P> {
     let frame = read_raw_frame(stream, buf, max_packet).await?;
     frame.decode_as::<P>().ok()
+}
+
+fn nbt_item_count(tag: &NbtTag) -> i32 {
+    match tag {
+        NbtTag::Int(v) => *v,
+        NbtTag::Byte(v) => i32::from(*v),
+        NbtTag::Short(v) => i32::from(*v),
+        _ => 0,
+    }
+}
+
+fn nbt_short_u16(tag: Option<&NbtTag>) -> u16 {
+    match tag {
+        Some(NbtTag::Short(v)) => (*v).max(0) as u16,
+        Some(NbtTag::Int(v)) => (*v).clamp(0, i32::from(u16::MAX)) as u16,
+        _ => 0,
+    }
+}
+
+pub(crate) fn encode_item_components_nbt(
+    comp: &rad_core::packet::play::ItemComponentPatch,
+) -> Option<NbtTag> {
+    if comp.is_empty() {
+        return None;
+    }
+    let mut map = std::collections::BTreeMap::new();
+    if let Some(ref name) = comp.custom_name {
+        map.insert(
+            "minecraft:custom_name".to_owned(),
+            NbtTag::String(name.clone()),
+        );
+    }
+    if let Some(dmg) = comp.damage {
+        map.insert("minecraft:damage".to_owned(), NbtTag::Int(dmg));
+    }
+    if let Some(max_dmg) = comp.max_damage {
+        map.insert("minecraft:max_damage".to_owned(), NbtTag::Int(max_dmg));
+    }
+    if let Some(cost) = comp.repair_cost {
+        map.insert("minecraft:repair_cost".to_owned(), NbtTag::Int(cost));
+    }
+    if comp.unbreakable {
+        map.insert(
+            "minecraft:unbreakable".to_owned(),
+            NbtTag::Compound(std::collections::BTreeMap::new()),
+        );
+    }
+    if !comp.removed.is_empty() {
+        map.insert(
+            "rad_removed".to_owned(),
+            NbtTag::List(comp.removed.iter().map(|id| NbtTag::Int(*id)).collect()),
+        );
+    }
+    Some(NbtTag::Compound(map))
+}
+
+pub(crate) fn decode_item_components_nbt(
+    item_map: &std::collections::BTreeMap<String, NbtTag>,
+) -> rad_core::packet::play::ItemComponentPatch {
+    if let Some(NbtTag::Compound(comp_map)) = item_map.get("components") {
+        let mut patch = rad_core::packet::play::ItemComponentPatch::default();
+        if let Some(NbtTag::String(name)) = comp_map.get("minecraft:custom_name") {
+            patch.custom_name = Some(name.clone());
+        }
+        if let Some(NbtTag::Int(dmg)) = comp_map.get("minecraft:damage") {
+            patch.damage = Some(*dmg);
+        }
+        if let Some(NbtTag::Int(max_dmg)) = comp_map.get("minecraft:max_damage") {
+            patch.max_damage = Some(*max_dmg);
+        }
+        if let Some(NbtTag::Int(cost)) = comp_map.get("minecraft:repair_cost") {
+            patch.repair_cost = Some(*cost);
+        }
+        if comp_map.contains_key("minecraft:unbreakable") {
+            patch.unbreakable = true;
+        }
+        if let Some(NbtTag::List(removed)) = comp_map.get("rad_removed") {
+            for tag in removed {
+                if let NbtTag::Int(id) = tag {
+                    patch.removed.push(*id);
+                }
+            }
+        }
+        return patch;
+    }
+    match item_map.get("rad_components") {
+        Some(NbtTag::String(raw)) => serde_json::from_str(raw).unwrap_or_default(),
+        _ => Default::default(),
+    }
+}
+
+fn encode_nbt_slot_item(
+    slot_idx: u8,
+    item_id: i32,
+    count: i32,
+    components: Option<&rad_core::packet::play::ItemComponentPatch>,
+    regs: &Version26_3Registries,
+) -> Option<NbtTag> {
+    if count <= 0 || item_id <= 0 {
+        return None;
+    }
+    let name = regs.item_name_by_id(item_id)?;
+    let mut item = std::collections::BTreeMap::new();
+    item.insert("Slot".to_string(), NbtTag::Byte(slot_idx as i8));
+    item.insert("id".to_string(), NbtTag::String(name.to_string()));
+    item.insert("count".to_string(), NbtTag::Int(count.clamp(1, 64)));
+    if let Some(comp) = components
+        && let Some(comp_tag) = encode_item_components_nbt(comp)
+    {
+        item.insert("components".to_string(), comp_tag);
+    }
+    Some(NbtTag::Compound(item))
+}
+
+#[cfg(test)]
+fn load_block_entities_into_stores(
+    world_dir: &std::path::Path,
+    regs: &Version26_3Registries,
+    containers: &mut crate::world::containers::ContainerStore,
+    furnaces: &mut crate::world::sim::FurnaceStore,
+) {
+    let loaded = crate::world::WorldState::load_all_block_entities_from_mca(
+        world_dir,
+        regs.provider().as_ref(),
+    );
+    apply_block_entities_to_stores(loaded, regs, containers, furnaces);
+}
+
+fn apply_block_entities_to_stores(
+    loaded: Vec<(
+        crate::world::worldgen::DimensionId,
+        std::collections::BTreeMap<String, NbtTag>,
+    )>,
+    regs: &Version26_3Registries,
+    containers: &mut crate::world::containers::ContainerStore,
+    furnaces: &mut crate::world::sim::FurnaceStore,
+) {
+    for (dim, map) in loaded {
+        let Some(NbtTag::String(id)) = map.get("id") else {
+            continue;
+        };
+        let (Some(NbtTag::Int(x)), Some(NbtTag::Int(y)), Some(NbtTag::Int(z))) =
+            (map.get("x"), map.get("y"), map.get("z"))
+        else {
+            continue;
+        };
+        if id == "minecraft:chest" {
+            let mut slots = vec![
+                rad_core::packet::play::SimpleSlot::default();
+                crate::world::containers::CHEST_SLOTS
+            ];
+            let mut comps = vec![
+                rad_core::packet::play::ItemComponentPatch::default();
+                crate::world::containers::CHEST_SLOTS
+            ];
+            if let Some(NbtTag::List(items)) = map.get("Items") {
+                for entry in items {
+                    let NbtTag::Compound(item) = entry else {
+                        continue;
+                    };
+                    let Some(NbtTag::Byte(slot_byte)) = item.get("Slot") else {
+                        continue;
+                    };
+                    let Ok(slot_idx) = usize::try_from(*slot_byte) else {
+                        continue;
+                    };
+                    if slot_idx >= crate::world::containers::CHEST_SLOTS {
+                        continue;
+                    }
+                    let Some(NbtTag::String(item_name)) = item.get("id") else {
+                        continue;
+                    };
+                    let Some(item_id) = regs.item_by_name(item_name) else {
+                        continue;
+                    };
+                    let count = item.get("count").map_or(0, nbt_item_count).clamp(0, 64);
+                    if count > 0 {
+                        slots[slot_idx] = rad_core::packet::play::SimpleSlot { count, item_id };
+                        comps[slot_idx] = decode_item_components_nbt(item);
+                    }
+                }
+            }
+            containers.set_chest_slots_in(dim, *x, *y, *z, slots, comps);
+        } else if id == "minecraft:furnace" {
+            let mut furnace = crate::world::sim::FurnaceEntity {
+                burn_time: nbt_short_u16(map.get("BurnTime")),
+                cook_progress: nbt_short_u16(map.get("CookTime")),
+                ..Default::default()
+            };
+            if let Some(NbtTag::List(items)) = map.get("Items") {
+                for entry in items {
+                    let NbtTag::Compound(item) = entry else {
+                        continue;
+                    };
+                    let Some(NbtTag::Byte(slot_byte)) = item.get("Slot") else {
+                        continue;
+                    };
+                    let Some(NbtTag::String(item_name)) = item.get("id") else {
+                        continue;
+                    };
+                    let Some(item_id) = regs.item_by_name(item_name) else {
+                        continue;
+                    };
+                    let count = item.get("count").map_or(0, nbt_item_count).clamp(0, 64);
+                    if count <= 0 {
+                        continue;
+                    }
+                    match *slot_byte {
+                        0 => {
+                            furnace.input_item = item_id;
+                            furnace.input_count = count;
+                        }
+                        1 => {
+                            furnace.fuel_item = item_id;
+                            furnace.fuel_count = count;
+                        }
+                        2 => {
+                            furnace.output_item = item_id;
+                            furnace.output_count = count;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            furnaces.insert_in(dim, *x, *y, *z, furnace);
+        }
+    }
+}
+
+fn sync_block_entities_to_world(
+    world: &mut crate::world::WorldState,
+    containers: &crate::world::containers::ContainerStore,
+    furnaces: &crate::world::sim::FurnaceStore,
+    regs: &Version26_3Registries,
+) {
+    let mut by_chunk: HashMap<
+        (crate::world::worldgen::DimensionId, i32, i32),
+        Vec<std::collections::BTreeMap<String, NbtTag>>,
+    > = HashMap::new();
+
+    for (dim, x, y, z, slots, comps) in containers.all_chests() {
+        let mut be = std::collections::BTreeMap::new();
+        be.insert(
+            "id".to_string(),
+            NbtTag::String("minecraft:chest".to_string()),
+        );
+        be.insert("x".to_string(), NbtTag::Int(x));
+        be.insert("y".to_string(), NbtTag::Int(y));
+        be.insert("z".to_string(), NbtTag::Int(z));
+        let mut items = Vec::new();
+        for (i, slot) in slots.iter().enumerate() {
+            if let Ok(idx) = u8::try_from(i)
+                && let Some(tag) =
+                    encode_nbt_slot_item(idx, slot.item_id, slot.count, comps.get(i), regs)
+            {
+                items.push(tag);
+            }
+        }
+        be.insert("Items".to_string(), NbtTag::List(items));
+        by_chunk
+            .entry((dim, x.div_euclid(16), z.div_euclid(16)))
+            .or_default()
+            .push(be);
+    }
+
+    for (dim, x, y, z, f) in furnaces.all_furnaces() {
+        let mut be = std::collections::BTreeMap::new();
+        be.insert(
+            "id".to_string(),
+            NbtTag::String("minecraft:furnace".to_string()),
+        );
+        be.insert("x".to_string(), NbtTag::Int(x));
+        be.insert("y".to_string(), NbtTag::Int(y));
+        be.insert("z".to_string(), NbtTag::Int(z));
+        be.insert("BurnTime".to_string(), NbtTag::Short(f.burn_time as i16));
+        be.insert(
+            "CookTime".to_string(),
+            NbtTag::Short(f.cook_progress as i16),
+        );
+        be.insert("CookTimeTotal".to_string(), NbtTag::Short(200));
+        let mut items = Vec::new();
+        if let Some(tag) = encode_nbt_slot_item(0, f.input_item, f.input_count, None, regs) {
+            items.push(tag);
+        }
+        if let Some(tag) = encode_nbt_slot_item(1, f.fuel_item, f.fuel_count, None, regs) {
+            items.push(tag);
+        }
+        if let Some(tag) = encode_nbt_slot_item(2, f.output_item, f.output_count, None, regs) {
+            items.push(tag);
+        }
+        be.insert("Items".to_string(), NbtTag::List(items));
+        by_chunk
+            .entry((dim, x.div_euclid(16), z.div_euclid(16)))
+            .or_default()
+            .push(be);
+    }
+
+    for ((dim, cx, cz), block_entities) in by_chunk {
+        world.set_chunk_block_entities(dim, cx, cz, block_entities);
+    }
+}
+
+#[cfg(test)]
+fn load_block_ticks_into_sim(
+    world_dir: &std::path::Path,
+    regs: &Version26_3Registries,
+    sim: &mut crate::world::sim::WorldSim,
+) {
+    let loaded = crate::world::WorldState::load_all_block_ticks_from_mca(
+        world_dir,
+        regs.provider().as_ref(),
+    );
+    apply_block_ticks_to_sim(loaded, sim);
+}
+
+fn apply_block_ticks_to_sim(
+    loaded: Vec<(
+        crate::world::worldgen::DimensionId,
+        std::collections::BTreeMap<String, NbtTag>,
+    )>,
+    sim: &mut crate::world::sim::WorldSim,
+) {
+    for (dim, map) in loaded {
+        let (Some(NbtTag::Int(x)), Some(NbtTag::Int(y)), Some(NbtTag::Int(z))) =
+            (map.get("x"), map.get("y"), map.get("z"))
+        else {
+            continue;
+        };
+        let delay = match map.get("t") {
+            Some(NbtTag::Int(t)) => (*t).max(1) as u64,
+            _ => 1,
+        };
+        let action = match map.get("rad_action") {
+            Some(NbtTag::String(tag)) => crate::world::sim::SimAction::decode_tag(tag),
+            _ => None,
+        }
+        .or_else(|| {
+            let Some(NbtTag::String(block_name)) = map.get("i") else {
+                return None;
+            };
+            let short = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
+            if matches!(short, "water" | "lava") {
+                Some(crate::world::sim::SimAction::FluidSpread { depth: 0 })
+            } else if matches!(short, "sand" | "red_sand" | "gravel")
+                || short.ends_with("_concrete_powder")
+                || short.ends_with("anvil")
+            {
+                Some(crate::world::sim::SimAction::GravityFall)
+            } else if short == "repeater" {
+                Some(crate::world::sim::SimAction::RepeaterTick)
+            } else if short == "fire" {
+                Some(crate::world::sim::SimAction::FireExtinguish)
+            } else {
+                None
+            }
+        });
+        if let Some(action) = action {
+            sim.schedule_loaded_tick(dim, *x, *y, *z, delay, action);
+        }
+    }
+}
+
+fn sync_block_ticks_to_world(
+    world: &mut crate::world::WorldState,
+    sim: &crate::world::sim::WorldSim,
+    regs: &Version26_3Registries,
+    cur_tick: u64,
+) {
+    let mut by_chunk: HashMap<
+        (crate::world::worldgen::DimensionId, i32, i32),
+        Vec<std::collections::BTreeMap<String, NbtTag>>,
+    > = HashMap::new();
+    for (dim, x, y, z, delay, action) in sim.all_pending_ticks(cur_tick) {
+        let state_id = world.get_block_in(dim, x, y, z);
+        let block_name = regs
+            .block_by_state(state_id)
+            .map_or_else(|| "minecraft:air".to_owned(), |b| b.name);
+        let mut tick = std::collections::BTreeMap::new();
+        tick.insert("i".to_owned(), NbtTag::String(block_name));
+        tick.insert("p".to_owned(), NbtTag::Int(0));
+        tick.insert(
+            "t".to_owned(),
+            NbtTag::Int(delay.clamp(1, i32::MAX as u64) as i32),
+        );
+        tick.insert("x".to_owned(), NbtTag::Int(x));
+        tick.insert("y".to_owned(), NbtTag::Int(y));
+        tick.insert("z".to_owned(), NbtTag::Int(z));
+        tick.insert("rad_action".to_owned(), NbtTag::String(action.encode_tag()));
+        by_chunk
+            .entry((dim, x.div_euclid(16), z.div_euclid(16)))
+            .or_default()
+            .push(tick);
+    }
+    for ((dim, cx, cz), block_ticks) in by_chunk {
+        world.set_chunk_block_ticks(dim, cx, cz, block_ticks);
+    }
+}
+
+#[cfg(test)]
+mod playerdata_nbt_tests {
+    use super::*;
+
+    #[test]
+    fn playerdata_nbt_roundtrip_preserves_state_and_inventory() {
+        let provider: Arc<dyn rad_core::registry_provider::RegistryProvider> =
+            Arc::new(crate::registries::synthetic_26_3_test_provider());
+        let regs = crate::registries::Version26_3Registries::from_provider(provider, true)
+            .expect("synthetic registries");
+        let item_id = regs.item_by_name("minecraft:cobblestone").unwrap_or(1);
+
+        let mut inv =
+            vec![SavedSlot::default(); crate::gameplay::inventory::PLAYER_INVENTORY_SLOTS];
+        inv[36] = SavedSlot {
+            count: 16,
+            item_id,
+            components: Default::default(),
+        };
+
+        let original = SavedPlayerData {
+            x: 12.5,
+            y: 65.0,
+            z: -3.25,
+            yaw: 90.0,
+            pitch: -15.0,
+            hp: 18.5,
+            food: 17,
+            saturation: 4.5,
+            game_mode: 1,
+            inventory: inv,
+            selected_hotbar: 2,
+            dimension: crate::world::worldgen::DimensionId::Nether,
+            stats: PlayerStats {
+                blocks_broken: 42,
+                blocks_placed: 7,
+                mobs_killed: 3,
+            },
+        };
+
+        let nbt = original.to_nbt(&regs);
+        let decoded = SavedPlayerData::from_nbt(&nbt, &regs).expect("decode nbt");
+        assert!((decoded.x - original.x).abs() < f64::EPSILON);
+        assert!((decoded.y - original.y).abs() < f64::EPSILON);
+        assert!((decoded.z - original.z).abs() < f64::EPSILON);
+        assert_eq!(decoded.game_mode, 1);
+        assert_eq!(decoded.selected_hotbar, 2);
+        assert_eq!(
+            decoded.dimension,
+            crate::world::worldgen::DimensionId::Nether
+        );
+        assert_eq!(decoded.inventory[36].count, 16);
+        assert_eq!(decoded.inventory[36].item_id, item_id);
+        assert_eq!(decoded.stats.blocks_broken, 42);
+    }
+
+    #[test]
+    fn block_entities_mca_roundtrip_preserves_chests_and_furnaces() {
+        let provider: Arc<dyn rad_core::registry_provider::RegistryProvider> =
+            Arc::new(crate::registries::synthetic_26_3_test_provider());
+        let regs = crate::registries::Version26_3Registries::from_provider(provider.clone(), true)
+            .expect("synthetic registries");
+        let item_id = regs.item_by_name("minecraft:cobblestone").unwrap_or(1);
+
+        let dir = std::env::temp_dir().join(format!(
+            "rad_block_entities_mca_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp world dir");
+
+        let mut world = crate::world::WorldState::new_with_registries(
+            Some(dir.clone()),
+            Arc::new(regs.clone()),
+        );
+        let mut containers = crate::world::containers::ContainerStore::default();
+        let mut slots = vec![
+            rad_core::packet::play::SimpleSlot::default();
+            crate::world::containers::CHEST_SLOTS
+        ];
+        slots[3] = rad_core::packet::play::SimpleSlot { count: 12, item_id };
+        let comps = vec![
+            rad_core::packet::play::ItemComponentPatch::default();
+            crate::world::containers::CHEST_SLOTS
+        ];
+        containers.set_chest_slots_in(
+            crate::world::worldgen::DimensionId::Overworld,
+            5,
+            64,
+            7,
+            slots,
+            comps,
+        );
+
+        let mut furnaces = crate::world::sim::FurnaceStore::default();
+        furnaces.insert_in(
+            crate::world::worldgen::DimensionId::Overworld,
+            6,
+            64,
+            7,
+            crate::world::sim::FurnaceEntity {
+                input_item: item_id,
+                input_count: 8,
+                fuel_item: item_id,
+                fuel_count: 2,
+                output_item: item_id,
+                output_count: 1,
+                burn_time: 150,
+                cook_progress: 45,
+            },
+        );
+
+        world.set_block(5, 64, 7, 1);
+        sync_block_entities_to_world(&mut world, &containers, &furnaces, &regs);
+        world.save_dirty_chunks().expect("save dirty chunks");
+
+        let mut loaded_containers = crate::world::containers::ContainerStore::default();
+        let mut loaded_furnaces = crate::world::sim::FurnaceStore::default();
+        load_block_entities_into_stores(&dir, &regs, &mut loaded_containers, &mut loaded_furnaces);
+
+        let chests = loaded_containers.all_chests();
+        assert_eq!(chests.len(), 1);
+        assert_eq!(chests[0].0, crate::world::worldgen::DimensionId::Overworld);
+        assert_eq!((chests[0].1, chests[0].2, chests[0].3), (5, 64, 7));
+        assert_eq!(chests[0].4[3].count, 12);
+        assert_eq!(chests[0].4[3].item_id, item_id);
+
+        let f_list = loaded_furnaces.all_furnaces();
+        assert_eq!(f_list.len(), 1);
+        assert_eq!((f_list[0].1, f_list[0].2, f_list[0].3), (6, 64, 7));
+        assert_eq!(f_list[0].4.burn_time, 150);
+        assert_eq!(f_list[0].4.cook_progress, 45);
+        assert_eq!(f_list[0].4.input_count, 8);
+        assert_eq!(f_list[0].4.fuel_count, 2);
+        assert_eq!(f_list[0].4.output_count, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn block_ticks_mca_roundtrip_preserves_sim_queue() {
+        let provider: Arc<dyn rad_core::registry_provider::RegistryProvider> =
+            Arc::new(crate::registries::synthetic_26_3_test_provider());
+        let regs = crate::registries::Version26_3Registries::from_provider(provider, true)
+            .expect("synthetic registries");
+
+        let dir =
+            std::env::temp_dir().join(format!("rad_block_ticks_mca_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp world dir");
+
+        let mut world = crate::world::WorldState::new_with_registries(
+            Some(dir.clone()),
+            Arc::new(regs.clone()),
+        );
+        world.set_block(4, 65, 8, 1);
+
+        let mut sim = crate::world::sim::WorldSim::default();
+        sim.schedule_loaded_tick(
+            crate::world::worldgen::DimensionId::Overworld,
+            4,
+            65,
+            8,
+            12,
+            crate::world::sim::SimAction::FluidSpread { depth: 2 },
+        );
+
+        sync_block_ticks_to_world(&mut world, &sim, &regs, 0);
+        world.save_dirty_chunks().expect("save dirty chunks");
+
+        let mut reloaded_sim = crate::world::sim::WorldSim::default();
+        load_block_ticks_into_sim(&dir, &regs, &mut reloaded_sim);
+        let ticks = reloaded_sim.all_pending_ticks(0);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(
+            ticks[0],
+            (
+                crate::world::worldgen::DimensionId::Overworld,
+                4,
+                65,
+                8,
+                12,
+                crate::world::sim::SimAction::FluidSpread { depth: 2 }
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

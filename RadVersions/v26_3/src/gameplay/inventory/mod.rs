@@ -1081,6 +1081,7 @@ impl PlayerInventory {
     }
 
     /// Adds a single block drop item to an existing matching stack or first empty hotbar/main slot.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn give_block_drop(&mut self, block_state: u16) -> bool {
         let Some(item_id) = block_state_to_item_id_with(block_state, &self.registries) else {
             return false;
@@ -1399,10 +1400,40 @@ pub fn block_state_to_item_id_with(block_state: u16, regs: &Version26_3Registrie
         | "minecraft:ice"
         | "minecraft:packed_ice"
         | "minecraft:blue_ice"
-        | "minecraft:spawner" => return None,
+        | "minecraft:spawner"
+        | "minecraft:piston_head"
+        | "minecraft:moving_piston"
+        | "minecraft:tall_grass"
+        | "minecraft:short_grass"
+        | "minecraft:fern"
+        | "minecraft:large_fern"
+        | "minecraft:dead_bush"
+        | "minecraft:cobweb"
+        | "minecraft:infested_stone"
+        | "minecraft:infested_cobblestone"
+        | "minecraft:infested_stone_bricks"
+        | "minecraft:infested_mossy_stone_bricks"
+        | "minecraft:infested_cracked_stone_bricks"
+        | "minecraft:infested_chiseled_stone_bricks"
+        | "minecraft:infested_deepslate" => return None,
         "minecraft:stone" => "minecraft:cobblestone",
         "minecraft:deepslate" => "minecraft:cobbled_deepslate",
-        "minecraft:grass_block" | "minecraft:podzol" | "minecraft:mycelium" => "minecraft:dirt",
+        "minecraft:grass_block"
+        | "minecraft:podzol"
+        | "minecraft:mycelium"
+        | "minecraft:farmland"
+        | "minecraft:dirt_path" => "minecraft:dirt",
+        "minecraft:redstone_wire" => "minecraft:redstone",
+        "minecraft:wall_torch" => "minecraft:torch",
+        "minecraft:redstone_wall_torch" => "minecraft:redstone_torch",
+        "minecraft:soul_wall_torch" => "minecraft:soul_torch",
+        "minecraft:copper_wall_torch" => "minecraft:copper_torch",
+        "minecraft:bamboo_sapling" => "minecraft:bamboo",
+        "minecraft:cocoa" => "minecraft:cocoa_beans",
+        "minecraft:sweet_berry_bush" => "minecraft:sweet_berries",
+        "minecraft:carrots" => "minecraft:carrot",
+        "minecraft:potatoes" => "minecraft:potato",
+        "minecraft:beetroots" => "minecraft:beetroot",
         "minecraft:coal_ore" | "minecraft:deepslate_coal_ore" => "minecraft:coal",
         "minecraft:iron_ore" | "minecraft:deepslate_iron_ore" => "minecraft:raw_iron",
         "minecraft:copper_ore" | "minecraft:deepslate_copper_ore" => "minecraft:raw_copper",

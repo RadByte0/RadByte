@@ -844,16 +844,8 @@ async fn e2e_initial_login_acknowledged_stays_in_configuration_and_merges_comman
         out.clear();
         let backend_cmds = DeclareCommands {
             nodes: vec![
-                rad_core::packet::play::CommandNode {
-                    kind: rad_core::packet::play::CommandNodeKind::Root,
-                    executable: false,
-                    children: vec![VarInt(1)],
-                },
-                rad_core::packet::play::CommandNode {
-                    kind: rad_core::packet::play::CommandNodeKind::Literal { name: "tps".into() },
-                    executable: true,
-                    children: vec![],
-                },
+                rad_core::packet::play::CommandNode::root(vec![VarInt(1)]),
+                rad_core::packet::play::CommandNode::literal("tps", true, vec![]),
             ],
             root_index: VarInt(0),
         };

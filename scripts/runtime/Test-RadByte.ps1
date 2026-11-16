@@ -301,8 +301,10 @@ try {
     $proxyPort = Get-FreeTcpPort
 
     $srvCfgPath = Join-Path $smokeDir "RadServer\rad.properties"
-    $limboCfgPath = Join-Path $smokeDir "RadLimbo\radlimbo.toml"
-    $proxyCfgPath = Join-Path $smokeDir "RadProxy\radproxy.toml"
+    $limboCfgPath = Join-Path $smokeDir "RadLimbo\rad.properties"
+    if (-not (Test-Path $limboCfgPath)) { $limboCfgPath = Join-Path $smokeDir "RadLimbo\radlimbo.toml" }
+    $proxyCfgPath = Join-Path $smokeDir "RadProxy\rad.properties"
+    if (-not (Test-Path $proxyCfgPath)) { $proxyCfgPath = Join-Path $smokeDir "RadProxy\radproxy.toml" }
 
     if (-not (Test-Path $srvCfgPath)) {
         $legacySrvCfgPath = Join-Path $smokeDir "RadServer\radserver.toml"
@@ -314,14 +316,22 @@ try {
         $srvCfgText = Get-Content -Raw $srvCfgPath
         $srvCfgText = $srvCfgText -replace '(?m)^bind-addr\s*=.*$', "bind-addr=127.0.0.1:$srvPort"
         $srvCfgText = $srvCfgText -replace '(?m)^server-port\s*=.*$', "server-port=$srvPort"
+        $srvCfgText = $srvCfgText -replace '(?m)^view-distance\s*=.*$', 'view-distance=2'
+        $srvCfgText = $srvCfgText -replace '(?m)^simulation-distance\s*=.*$', 'simulation-distance=2'
         $srvCfgText = $srvCfgText -replace '(?m)^(game-mode|gamemode)\s*=.*$', 'gamemode=survival'
         Set-Content -Encoding UTF8 $srvCfgPath $srvCfgText
     }
-    (Get-Content -Raw $limboCfgPath) -replace 'bind_addr\s*=\s*"[^"]*"', "bind_addr = `"127.0.0.1:$limboPort`"" |
-        Set-Content -Encoding UTF8 $limboCfgPath
+    $limboText = Get-Content -Raw $limboCfgPath
+    $limboText = $limboText -replace 'bind_addr\s*=\s*"[^"]*"', "bind_addr = `"127.0.0.1:$limboPort`""
+    $limboText = $limboText -replace '(?m)^server-port\s*=.*$', "server-port=$limboPort"
+    Set-Content -Encoding UTF8 $limboCfgPath $limboText
+
     $proxyText = Get-Content -Raw $proxyCfgPath
     $proxyText = $proxyText -replace 'bind_addr\s*=\s*"[^"]*"', "bind_addr = `"127.0.0.1:$proxyPort`""
+    $proxyText = $proxyText -replace '(?m)^server-ip\s*=.*$', 'server-ip=127.0.0.1'
+    $proxyText = $proxyText -replace '(?m)^server-port\s*=.*$', "server-port=$proxyPort"
     $proxyText = $proxyText -replace 'limbo\s*=\s*"[^"]*"', "limbo = `"127.0.0.1:$limboPort`""
+    $proxyText = $proxyText -replace '(?m)^server\.limbo\s*=.*$', "server.limbo=127.0.0.1:$limboPort"
     Set-Content -Encoding UTF8 $proxyCfgPath $proxyText
 
     $directJson = ""

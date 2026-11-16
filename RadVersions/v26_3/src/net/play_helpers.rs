@@ -48,6 +48,7 @@ pub(super) async fn handle_player_move(
     new_pos: Option<(f64, f64, f64)>,
     new_rot: Option<(f32, f32)>,
     elapsed_secs: f64,
+    effective_view_distance: i32,
 ) {
     // Ignore stale client movement packets while a server-initiated teleport is unconfirmed.
     if let Some(p) = state.players.read().await.get(&entity_id)
@@ -115,6 +116,36 @@ pub(super) async fn handle_player_move(
             state.registries.provider().as_ref(),
         )
     };
+    let resets_fall = player_mode == 1 || player_mode == 3 || {
+        let mut world = state.world.write().await;
+        let bx = nx.floor() as i32;
+        let by = ny.floor() as i32;
+        let bz = nz.floor() as i32;
+        let feet = world.get_block_in(cur_dim, bx, by, bz);
+        let below = world.get_block_in(cur_dim, bx, by - 1, bz);
+        let is_fall_negating = |st: u16| -> bool {
+            state.registries.is_fluid_state(st)
+                || state.registries.block_by_state(st).is_some_and(|b| {
+                    matches!(
+                        b.name.as_str(),
+                        "minecraft:ladder"
+                            | "minecraft:vine"
+                            | "minecraft:weeping_vines"
+                            | "minecraft:weeping_vines_plant"
+                            | "minecraft:twisting_vines"
+                            | "minecraft:twisting_vines_plant"
+                            | "minecraft:scaffolding"
+                            | "minecraft:cobweb"
+                            | "minecraft:powder_snow"
+                            | "minecraft:sweet_berry_bush"
+                            | "minecraft:slime_block"
+                            | "minecraft:honey_block"
+                            | "minecraft:water"
+                    )
+                })
+        };
+        is_fall_negating(feet) || is_fall_negating(below)
+    };
 
     let dx_raw = ((nx * 4096.0) - (*cur_x * 4096.0)).round() as i64;
     let dy_raw = ((ny * 4096.0) - (*cur_y * 4096.0)).round() as i64;
@@ -141,7 +172,9 @@ pub(super) async fn handle_player_move(
         session.pitch = npitch;
         session.on_ground = on_ground;
 
-        if !on_ground {
+        if resets_fall {
+            session.fall_start_y = None;
+        } else if !on_ground {
             let peak = session.fall_start_y.map_or(ny, |prev| prev.max(ny));
             session.fall_start_y = Some(peak);
         } else {
@@ -154,6 +187,11 @@ pub(super) async fn handle_player_move(
 
     if fall_damage > 0.0 {
         apply_player_damage(state, entity_id, fall_damage, nyaw, None).await;
+    } else if player_mode != 1
+        && player_mode != 3
+        && ny < f64::from(crate::world::anvil::MIN_WORLD_Y - 64)
+    {
+        apply_player_damage(state, entity_id, 4.0, nyaw, None).await;
     }
 
     let cur_dim = state
@@ -228,6 +266,8 @@ pub(super) async fn handle_player_move(
         cur_cz,
         new_cx,
         new_cz,
+        effective_view_distance,
+        false,
     )
     .await;
 }
@@ -242,14 +282,15 @@ pub(super) async fn sync_player_chunks(
     cur_cz: &mut i32,
     new_cx: i32,
     new_cz: i32,
+    view_distance: i32,
+    force_resync: bool,
 ) {
-    if new_cx != *cur_cx || new_cz != *cur_cz {
+    if force_resync || new_cx != *cur_cx || new_cz != *cur_cz {
         *cur_cx = new_cx;
         *cur_cz = new_cz;
-        let desired: HashSet<(i32, i32)> =
-            chunks_in_radius(new_cx, new_cz, state.config.view_distance)
-                .into_iter()
-                .collect();
+        let desired: HashSet<(i32, i32)> = chunks_in_radius(new_cx, new_cz, view_distance)
+            .into_iter()
+            .collect();
         let mut batch = BytesMut::with_capacity(4096);
         let _ = encode_packet(
             &SetChunkCacheCenter {
@@ -270,12 +311,13 @@ pub(super) async fn sync_player_chunks(
         if !tx.send_wait(batch.freeze()).await {
             return;
         }
-        let to_load: Vec<_> = chunks_in_radius(new_cx, new_cz, state.config.view_distance)
+        let to_load: Vec<_> = chunks_in_radius(new_cx, new_cz, view_distance)
             .into_iter()
             .filter(|pos| !loaded_chunks.contains(pos))
             .collect();
-        for group in to_load.chunks(4) {
-            let mut batch = BytesMut::new();
+        state.ensure_chunks_extras_loaded(dim, &to_load).await;
+        for group in to_load.chunks(16) {
+            let mut batch = BytesMut::with_capacity(16 * 4096);
             let mut world = state.world.write().await;
             for &(cx, cz) in group {
                 let _ = encode_packet(&world.chunk_packet_in(dim, cx, cz), &mut batch);

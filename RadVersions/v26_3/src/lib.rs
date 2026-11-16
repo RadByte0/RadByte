@@ -81,28 +81,27 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
         error!(world = %world_root.display(), %error, "refusing startup with invalid container storage");
         return 1;
     }
-    let should_stamp_profile =
-        match rad_version::check_world_compatibility(world_root, &rad_version::MC_26_3) {
-            Ok(rad_version::WorldCompatibility::Compatible) => false,
-            Ok(
-                rad_version::WorldCompatibility::EmptyNewWorld
-                | rad_version::WorldCompatibility::ConfirmedLegacyRadByteWorld,
-            ) => true,
-            Ok(rad_version::WorldCompatibility::UnmarkedInsufficientData { reason })
-            | Ok(rad_version::WorldCompatibility::Incompatible { reason })
-            | Ok(rad_version::WorldCompatibility::CorruptMetadata { reason }) => {
-                error!(world = %world_root.display(), "{reason}");
-                return 1;
-            }
-            Err(e) => {
-                error!(error = %e, world = %world_root.display(), "failed to verify world profile");
-                return 1;
-            }
-        };
+    match rad_version::check_world_compatibility(world_root, &rad_version::MC_26_3) {
+        Ok(
+            rad_version::WorldCompatibility::Compatible
+            | rad_version::WorldCompatibility::EmptyNewWorld
+            | rad_version::WorldCompatibility::ConfirmedLegacyRadByteWorld,
+        ) => {}
+        Ok(rad_version::WorldCompatibility::UnmarkedInsufficientData { reason })
+        | Ok(rad_version::WorldCompatibility::Incompatible { reason })
+        | Ok(rad_version::WorldCompatibility::CorruptMetadata { reason }) => {
+            error!(world = %world_root.display(), "{reason}");
+            return 1;
+        }
+        Err(e) => {
+            error!(error = %e, world = %world_root.display(), "failed to verify world profile");
+            return 1;
+        }
+    }
 
     for dir in [
         format!("{}/region", cfg.level_name),
-        format!("{}/playerdata", cfg.level_name),
+        format!("{}/players", cfg.level_name),
         "radons".to_owned(),
         "radonfigs".to_owned(),
     ] {
@@ -110,13 +109,6 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
             error!(error = %e, dir, "failed to create server directory");
             return 1;
         }
-    }
-    if should_stamp_profile
-        && let Err(e) = rad_version::WorldMechanicsProfile::from_descriptor(&rad_version::MC_26_3)
-            .write_atomic(world_root)
-    {
-        error!(error = %e, world = %world_root.display(), "failed to stamp world profile");
-        return 1;
     }
     info!(
         config_version = SERVER_CONFIG_VERSION,

@@ -2,11 +2,10 @@
 
 mod region;
 
-pub use region::{AnvilRegion, StorageFormat, VanillaImportChunk, detect_storage_format};
-use region::{
-    block_light_emission_with, block_light_opacity_with, get_nibble, set_nibble,
-    vanilla_block_entry_to_state_with,
+pub use region::{
+    AnvilRegion, LightTables, StorageFormat, VanillaImportChunk, detect_storage_format,
 };
+use region::{get_nibble, set_nibble, vanilla_block_entry_to_state_with};
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -150,11 +149,26 @@ impl ChunkSection {
     }
 }
 
+/// Preserved Vanilla Anvil `SkyLight` and `BlockLight` nibbles for all 26 light sections (`-1..=24`).
+#[derive(Debug, Clone)]
+pub struct VanillaChunkLight {
+    /// 26 sky light nibble arrays (`2048` bytes each).
+    pub sky_sections: Vec<[u8; 2048]>,
+    /// 26 block light nibble arrays (`2048` bytes each).
+    pub block_sections: Vec<[u8; 2048]>,
+}
+
 /// Full 16x384x16 chunk column.
 #[derive(Debug, Clone)]
 pub struct ChunkColumn {
     /// 24 sections from `Y = -64` to `Y = 320`.
     pub sections: Vec<ChunkSection>,
+    /// Vanilla Anvil `block_entities` NBT compounds for this chunk.
+    pub block_entities: Vec<std::collections::BTreeMap<String, rad_core::nbt::NbtTag>>,
+    /// Vanilla Anvil `block_ticks` NBT compounds for this chunk.
+    pub block_ticks: Vec<std::collections::BTreeMap<String, rad_core::nbt::NbtTag>>,
+    /// Preserved Vanilla light nibbles when loaded from `.mca` and unmodified.
+    pub vanilla_light: Option<Box<VanillaChunkLight>>,
     /// Whether this chunk has unsaved modifications.
     pub dirty: bool,
     /// Monotonic mutation revision for race-free async saves.
@@ -178,6 +192,9 @@ impl ChunkColumn {
         }
         Self {
             sections,
+            block_entities: Vec::new(),
+            block_ticks: Vec::new(),
+            vanilla_light: None,
             dirty: false,
             revision: 0,
         }
@@ -188,6 +205,9 @@ impl ChunkColumn {
     pub fn from_sections(sections: Vec<ChunkSection>) -> Self {
         Self {
             sections,
+            block_entities: Vec::new(),
+            block_ticks: Vec::new(),
+            vanilla_light: None,
             dirty: false,
             revision: 0,
         }
@@ -218,6 +238,7 @@ impl ChunkColumn {
         let sec_idx = ((y - MIN_WORLD_Y) / 16) as usize;
         let local_y = ((y - MIN_WORLD_Y) % 16) as usize;
         self.sections[sec_idx].set(x, local_y, z, state_id);
+        self.vanilla_light = None;
         self.dirty = true;
         self.revision = self.revision.wrapping_add(1);
         true
@@ -231,16 +252,84 @@ impl ChunkColumn {
         chunk_z: i32,
         provider: &dyn rad_core::registry_provider::RegistryProvider,
     ) -> LevelChunkWithLight {
+        let tables = LightTables::from_provider(provider);
+        self.to_packet_with_tables(chunk_x, chunk_z, &tables)
+    }
+
+    /// Serializes this chunk column into a [`LevelChunkWithLight`] packet using precomputed `tables`.
+    #[must_use]
+    pub fn to_packet_with_tables(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        tables: &LightTables,
+    ) -> LevelChunkWithLight {
+        self.to_packet_with_tables_and_neighbors(chunk_x, chunk_z, tables, [None, None, None, None])
+    }
+
+    /// Serializes this chunk column using precomputed `tables` and optional `[west, east, north, south]` neighbors for cross-chunk lighting.
+    #[must_use]
+    pub fn to_packet_with_tables_and_neighbors(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        tables: &LightTables,
+        neighbors: [Option<&Self>; 4],
+    ) -> LevelChunkWithLight {
         let mut data = BytesMut::with_capacity(1024);
         for sec in &self.sections {
             sec.encode_paletted(&mut data);
         }
 
         let total_light_sections = OVERWORLD_SECTIONS + 2; // 26 sections: below(-1), 0..23, above(24)
+        if !self.dirty
+            && let Some(vl) = &self.vanilla_light
+        {
+            let mut sky_light_mask: u32 = 0;
+            let mut empty_sky_light_mask: u32 = 0;
+            let mut sky_lights = Vec::new();
+            for (idx, arr) in vl.sky_sections.iter().enumerate() {
+                if arr.iter().all(|&b| b == 0) {
+                    empty_sky_light_mask |= 1u32 << idx;
+                } else {
+                    sky_light_mask |= 1u32 << idx;
+                    sky_lights.push(arr.to_vec());
+                }
+            }
+            let mut block_light_mask: u32 = 0;
+            let mut empty_block_light_mask: u32 = 0;
+            let mut block_lights = Vec::new();
+            for (idx, arr) in vl.block_sections.iter().enumerate() {
+                if arr.iter().all(|&b| b == 0) {
+                    empty_block_light_mask |= 1u32 << idx;
+                } else {
+                    block_light_mask |= 1u32 << idx;
+                    block_lights.push(arr.to_vec());
+                }
+            }
+            let motion_blocking = self.packed_motion_blocking_heightmap();
+            return LevelChunkWithLight {
+                chunk_x,
+                chunk_z,
+                heightmaps: vec![HeightmapEntry {
+                    kind: VarInt(4),
+                    data: motion_blocking,
+                }],
+                data: data.to_vec(),
+                sky_light_mask: sky_light_mask.to_le_bytes().to_vec(),
+                block_light_mask: block_light_mask.to_le_bytes().to_vec(),
+                empty_sky_light_mask: empty_sky_light_mask.to_le_bytes().to_vec(),
+                empty_block_light_mask: empty_block_light_mask.to_le_bytes().to_vec(),
+                sky_lights,
+                block_lights,
+            };
+        }
         let mut sky_sections: Vec<[u8; 2048]> = vec![[0u8; 2048]; total_light_sections];
         sky_sections[total_light_sections - 1].fill(0xFF); // above-world sky is always 15
 
-        // Column-by-column skylight attenuation from top down.
+        let mut min_active_sec = OVERWORLD_SECTIONS;
+
+        // 1. Column-by-column vertical skylight pass from top down.
         for z in 0..16usize {
             for x in 0..16usize {
                 let mut light: u8 = 15;
@@ -250,19 +339,21 @@ impl ChunkColumn {
                     }
                     let light_sec_idx = sec_idx + 1;
                     if let ChunkSection::Uniform(state) = self.sections[sec_idx] {
-                        let opacity = block_light_opacity_with(state, provider);
+                        let opacity = tables.opacity(state);
                         if opacity == 0 {
                             for ly in 0..16usize {
                                 set_nibble(&mut sky_sections[light_sec_idx], x, ly, z, light);
                             }
                             continue;
                         } else if opacity >= 15 {
+                            min_active_sec = min_active_sec.min(sec_idx);
                             break;
                         }
                     }
+                    min_active_sec = min_active_sec.min(sec_idx);
                     for ly in (0..16usize).rev() {
                         let state = self.sections[sec_idx].get(x, ly, z);
-                        let opacity = block_light_opacity_with(state, provider);
+                        let opacity = tables.opacity(state);
                         if opacity >= 15 {
                             light = 0;
                             break;
@@ -271,6 +362,159 @@ impl ChunkColumn {
                             light = light.saturating_sub(opacity);
                         }
                         set_nibble(&mut sky_sections[light_sec_idx], x, ly, z, light);
+                    }
+                }
+            }
+        }
+
+        // 2. 3D horizontal/vertical skylight flood-fill around canopies, overhangs, and cave mouths.
+        if min_active_sec < OVERWORLD_SECTIONS {
+            let mut sky_queue = std::collections::VecDeque::new();
+            let start_sec = min_active_sec.saturating_sub(1);
+            for sec_idx in start_sec..OVERWORLD_SECTIONS {
+                let light_sec_idx = sec_idx + 1;
+                if matches!(self.sections[sec_idx], ChunkSection::Uniform(0))
+                    && sec_idx > min_active_sec + 1
+                {
+                    continue;
+                }
+                for ly in 0..16usize {
+                    let y = MIN_WORLD_Y + (sec_idx as i32) * 16 + ly as i32;
+                    for z in 0..16usize {
+                        for x in 0..16usize {
+                            let cur = get_nibble(&sky_sections[light_sec_idx], x, ly, z);
+                            if cur <= 1 {
+                                continue;
+                            }
+                            let mut needs_spread = false;
+                            for (dx, dy, dz) in [
+                                (1i32, 0i32, 0i32),
+                                (-1, 0, 0),
+                                (0, 0, 1),
+                                (0, 0, -1),
+                                (0, -1, 0),
+                            ] {
+                                let nx = x as i32 + dx;
+                                let ny = y + dy;
+                                let nz = z as i32 + dz;
+                                if !(0..16).contains(&nx)
+                                    || !(0..16).contains(&nz)
+                                    || !(MIN_WORLD_Y..MAX_WORLD_Y).contains(&ny)
+                                {
+                                    continue;
+                                }
+                                let nsec = ((ny - MIN_WORLD_Y) / 16) as usize;
+                                let nly = ((ny - MIN_WORLD_Y) % 16) as usize;
+                                let nopacity = tables.opacity(self.sections[nsec].get(
+                                    nx as usize,
+                                    nly,
+                                    nz as usize,
+                                ));
+                                if nopacity < 15 {
+                                    let ncur = get_nibble(
+                                        &sky_sections[nsec + 1],
+                                        nx as usize,
+                                        nly,
+                                        nz as usize,
+                                    );
+                                    if cur.saturating_sub(nopacity.max(1)) > ncur {
+                                        needs_spread = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if needs_spread {
+                                sky_queue.push_back((x as i32, y, z as i32, cur));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Seed cross-chunk skylight from adjacent chunks' Vanilla light borders when available.
+            let border_specs: [(usize, usize, usize, bool); 4] = [
+                (0, 15, 0, true),  // west neighbor (cx-1): its x=15 -> our x=0
+                (1, 0, 15, true),  // east neighbor (cx+1): its x=0 -> our x=15
+                (2, 15, 0, false), // north neighbor (cz-1): its z=15 -> our z=0
+                (3, 0, 15, false), // south neighbor (cz+1): its z=0 -> our z=15
+            ];
+            for (n_idx, n_coord, our_coord, along_z) in border_specs {
+                let Some(nb) = neighbors[n_idx] else {
+                    continue;
+                };
+                let Some(vl) = nb.vanilla_light.as_deref() else {
+                    continue;
+                };
+                for sec_idx in start_sec..OVERWORLD_SECTIONS {
+                    for ly in 0..16usize {
+                        let y = MIN_WORLD_Y + (sec_idx as i32) * 16 + ly as i32;
+                        for t in 0..16usize {
+                            let (nx, nz, ox, oz) = if along_z {
+                                (n_coord, t, our_coord, t)
+                            } else {
+                                (t, n_coord, t, our_coord)
+                            };
+                            let nlight = get_nibble(&vl.sky_sections[sec_idx + 1], nx, ly, nz);
+                            if nlight <= 1 {
+                                continue;
+                            }
+                            let opacity = tables.opacity(self.sections[sec_idx].get(ox, ly, oz));
+                            if opacity >= 15 {
+                                continue;
+                            }
+                            let next_level = nlight.saturating_sub(opacity.max(1));
+                            let cur = get_nibble(&sky_sections[sec_idx + 1], ox, ly, oz);
+                            if next_level > cur {
+                                set_nibble(&mut sky_sections[sec_idx + 1], ox, ly, oz, next_level);
+                                sky_queue.push_back((ox as i32, y, oz as i32, next_level));
+                            }
+                        }
+                    }
+                }
+            }
+
+            while let Some((x, y, z, level)) = sky_queue.pop_front() {
+                if level <= 1 {
+                    continue;
+                }
+                for (dx, dy, dz) in [
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ] {
+                    let nx = x + dx;
+                    let ny = y + dy;
+                    let nz = z + dz;
+                    if !(0..16).contains(&nx)
+                        || !(0..16).contains(&nz)
+                        || !(MIN_WORLD_Y..MAX_WORLD_Y).contains(&ny)
+                    {
+                        continue;
+                    }
+                    let nsec = ((ny - MIN_WORLD_Y) / 16) as usize;
+                    let nly = ((ny - MIN_WORLD_Y) % 16) as usize;
+                    let nstate = self.sections[nsec].get(nx as usize, nly, nz as usize);
+                    let opacity = tables.opacity(nstate);
+                    if opacity >= 15 {
+                        continue;
+                    }
+                    let next_level = level.saturating_sub(opacity.max(1));
+                    if next_level == 0 {
+                        continue;
+                    }
+                    let cur = get_nibble(&sky_sections[nsec + 1], nx as usize, nly, nz as usize);
+                    if next_level > cur {
+                        set_nibble(
+                            &mut sky_sections[nsec + 1],
+                            nx as usize,
+                            nly,
+                            nz as usize,
+                            next_level,
+                        );
+                        sky_queue.push_back((nx, ny, nz, next_level));
                     }
                 }
             }
@@ -293,7 +537,7 @@ impl ChunkColumn {
         let mut queue = std::collections::VecDeque::new();
         for (sec_idx, sec) in self.sections.iter().enumerate() {
             let has_emitter = match sec {
-                ChunkSection::Uniform(s) => block_light_emission_with(*s, provider) > 0,
+                ChunkSection::Uniform(s) => tables.emission(*s) > 0,
                 ChunkSection::Blocks(_) => true,
             };
             if !has_emitter {
@@ -302,11 +546,56 @@ impl ChunkColumn {
             for ly in 0..16usize {
                 for z in 0..16usize {
                     for x in 0..16usize {
-                        let emit = block_light_emission_with(sec.get(x, ly, z), provider);
+                        let emit = tables.emission(sec.get(x, ly, z));
                         if emit > 0 {
                             let y = MIN_WORLD_Y + (sec_idx as i32) * 16 + ly as i32;
                             set_nibble(&mut block_sections[sec_idx + 1], x, ly, z, emit);
                             queue.push_back((x as i32, y, z as i32, emit));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Seed cross-chunk block light from adjacent chunks' Vanilla light borders when available.
+        let border_specs: [(usize, usize, usize, bool); 4] = [
+            (0, 15, 0, true),
+            (1, 0, 15, true),
+            (2, 15, 0, false),
+            (3, 0, 15, false),
+        ];
+        for (n_idx, n_coord, our_coord, along_z) in border_specs {
+            let Some(nb) = neighbors[n_idx] else {
+                continue;
+            };
+            let Some(vl) = nb.vanilla_light.as_deref() else {
+                continue;
+            };
+            for sec_idx in 0..OVERWORLD_SECTIONS {
+                if vl.block_sections[sec_idx + 1].iter().all(|&b| b == 0) {
+                    continue;
+                }
+                for ly in 0..16usize {
+                    let y = MIN_WORLD_Y + (sec_idx as i32) * 16 + ly as i32;
+                    for t in 0..16usize {
+                        let (nx, nz, ox, oz) = if along_z {
+                            (n_coord, t, our_coord, t)
+                        } else {
+                            (t, n_coord, t, our_coord)
+                        };
+                        let nlight = get_nibble(&vl.block_sections[sec_idx + 1], nx, ly, nz);
+                        if nlight <= 1 {
+                            continue;
+                        }
+                        let opacity = tables.opacity(self.sections[sec_idx].get(ox, ly, oz));
+                        if opacity >= 15 {
+                            continue;
+                        }
+                        let next_level = nlight.saturating_sub(1 + opacity);
+                        let cur = get_nibble(&block_sections[sec_idx + 1], ox, ly, oz);
+                        if next_level > cur {
+                            set_nibble(&mut block_sections[sec_idx + 1], ox, ly, oz, next_level);
+                            queue.push_back((ox as i32, y, oz as i32, next_level));
                         }
                     }
                 }
@@ -337,7 +626,7 @@ impl ChunkColumn {
                 let nsec = ((ny - MIN_WORLD_Y) / 16) as usize;
                 let nly = ((ny - MIN_WORLD_Y) % 16) as usize;
                 let nstate = self.sections[nsec].get(nx as usize, nly, nz as usize);
-                let opacity = block_light_opacity_with(nstate, provider);
+                let opacity = tables.opacity(nstate);
                 if opacity >= 15 {
                     continue;
                 }
@@ -484,6 +773,9 @@ impl ChunkColumn {
         }
         Ok(Self {
             sections,
+            block_entities: Vec::new(),
+            block_ticks: Vec::new(),
+            vanilla_light: None,
             dirty: false,
             revision: 0,
         })
@@ -525,9 +817,24 @@ impl ChunkColumn {
                 .collect(),
             _ => Vec::new(),
         };
+        let block_ticks = match root.get("block_ticks") {
+            Some(NbtTag::List(list)) => list
+                .iter()
+                .filter_map(|tag| match tag {
+                    NbtTag::Compound(map) => Some(map.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
 
         let mut section_biomes = Vec::new();
         let mut sections = vec![ChunkSection::Uniform(0); OVERWORLD_SECTIONS];
+        let total_light_sections = OVERWORLD_SECTIONS + 2;
+        let mut vanilla_sky = vec![[0u8; 2048]; total_light_sections];
+        vanilla_sky[total_light_sections - 1].fill(0xFF);
+        let mut vanilla_block = vec![[0u8; 2048]; total_light_sections];
+        let mut has_vanilla_light = false;
         for sec_tag in nbt_sections {
             let NbtTag::Compound(sec) = sec_tag else {
                 continue;
@@ -538,6 +845,22 @@ impl ChunkColumn {
             let sec_pos = i32::from(*y_idx) + 4;
             if !(0..OVERWORLD_SECTIONS as i32).contains(&sec_pos) {
                 continue;
+            }
+            if let Some(NbtTag::ByteArray(bytes)) = sec.get("SkyLight")
+                && bytes.len() == 2048
+            {
+                for (dst, &src) in vanilla_sky[sec_pos as usize + 1].iter_mut().zip(bytes) {
+                    *dst = src as u8;
+                }
+                has_vanilla_light = true;
+            }
+            if let Some(NbtTag::ByteArray(bytes)) = sec.get("BlockLight")
+                && bytes.len() == 2048
+            {
+                for (dst, &src) in vanilla_block[sec_pos as usize + 1].iter_mut().zip(bytes) {
+                    *dst = src as u8;
+                }
+                has_vanilla_light = true;
             }
             if let Some(NbtTag::Compound(biomes)) = sec.get("biomes")
                 && let Some(NbtTag::List(b_pal)) = biomes.get("palette")
@@ -565,17 +888,24 @@ impl ChunkColumn {
             let mut palette = Vec::with_capacity(palette_tags.len());
             for entry in palette_tags {
                 let state = match entry {
-                    NbtTag::Compound(map) => match map.get("Name") {
-                        Some(NbtTag::String(name)) => {
-                            let props = match map.get("Properties") {
-                                Some(NbtTag::Compound(p)) => Some(p),
-                                _ => None,
-                            };
-                            vanilla_block_entry_to_state_with(name, props, provider)
-                                .ok_or(AnvilDecodeError::ForeignOrCorrupt)?
-                        }
-                        _ => return Err(AnvilDecodeError::ForeignOrCorrupt),
-                    },
+                    NbtTag::String(name) => vanilla_block_entry_to_state_with(name, None, provider)
+                        .ok_or(AnvilDecodeError::ForeignOrCorrupt)?,
+                    NbtTag::Compound(map) => {
+                        let name = match map
+                            .get("Name")
+                            .or_else(|| map.get("id"))
+                            .or_else(|| map.get(""))
+                        {
+                            Some(NbtTag::String(name)) => name,
+                            _ => return Err(AnvilDecodeError::ForeignOrCorrupt),
+                        };
+                        let props = match map.get("Properties").or_else(|| map.get("properties")) {
+                            Some(NbtTag::Compound(p)) => Some(p),
+                            _ => None,
+                        };
+                        vanilla_block_entry_to_state_with(name, props, provider)
+                            .ok_or(AnvilDecodeError::ForeignOrCorrupt)?
+                    }
                     _ => return Err(AnvilDecodeError::ForeignOrCorrupt),
                 };
                 palette.push(state);
@@ -606,9 +936,21 @@ impl ChunkColumn {
             sections[sec_pos as usize] = ChunkSection::Blocks(arr);
         }
 
+        let vanilla_light = if has_vanilla_light {
+            Some(Box::new(VanillaChunkLight {
+                sky_sections: vanilla_sky,
+                block_sections: vanilla_block,
+            }))
+        } else {
+            None
+        };
+
         Ok(VanillaImportChunk {
             column: Self {
                 sections,
+                block_entities: block_entities.clone(),
+                block_ticks,
+                vanilla_light,
                 dirty: false,
                 revision: 0,
             },
@@ -643,6 +985,8 @@ impl ChunkColumn {
             map.insert("xPos".to_owned(), NbtTag::Int(chunk_x));
             map.insert("yPos".to_owned(), NbtTag::Int(-4));
             map.insert("zPos".to_owned(), NbtTag::Int(chunk_z));
+            map.insert("LastUpdate".to_owned(), NbtTag::Long(0));
+            map.insert("InhabitedTime".to_owned(), NbtTag::Long(0));
             map.insert(
                 "Status".to_owned(),
                 NbtTag::String("minecraft:full".to_owned()),
@@ -675,6 +1019,14 @@ impl ChunkColumn {
             let mut sec_map = by_y.remove(&y_idx).unwrap_or_default();
             sec_map.insert("Y".to_owned(), NbtTag::Byte(y_idx));
             sec_map.insert("block_states".to_owned(), NbtTag::Compound(bs));
+            if !sec_map.contains_key("biomes") {
+                let mut biomes = BTreeMap::new();
+                biomes.insert(
+                    "palette".to_owned(),
+                    NbtTag::List(vec![NbtTag::String("minecraft:plains".to_owned())]),
+                );
+                sec_map.insert("biomes".to_owned(), NbtTag::Compound(biomes));
+            }
             out_sections.push(NbtTag::Compound(sec_map));
         }
 
@@ -684,6 +1036,34 @@ impl ChunkColumn {
         }
 
         root.insert("sections".to_owned(), NbtTag::List(out_sections));
+        if !self.block_entities.is_empty() {
+            root.insert(
+                "block_entities".to_owned(),
+                NbtTag::List(
+                    self.block_entities
+                        .iter()
+                        .cloned()
+                        .map(NbtTag::Compound)
+                        .collect(),
+                ),
+            );
+        } else if template_raw_nbt.is_none() {
+            root.remove("block_entities");
+        }
+        if !self.block_ticks.is_empty() {
+            root.insert(
+                "block_ticks".to_owned(),
+                NbtTag::List(
+                    self.block_ticks
+                        .iter()
+                        .cloned()
+                        .map(NbtTag::Compound)
+                        .collect(),
+                ),
+            );
+        } else if template_raw_nbt.is_none() {
+            root.remove("block_ticks");
+        }
 
         let mut out = BytesMut::new();
         encode_named_nbt(&root_name, &NbtTag::Compound(root), &mut out)

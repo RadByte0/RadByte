@@ -4,6 +4,7 @@ pub mod anvil;
 pub mod containers;
 pub mod migrate;
 pub mod physics;
+pub mod portals;
 pub mod sim;
 pub mod worldgen;
 
@@ -25,8 +26,8 @@ use crate::registries::Version26_3Registries;
 
 /// Number of 16x16x16 sections in standard Overworld (`Y = -64..320`).
 pub const OVERWORLD_SECTIONS: usize = 24;
-/// Default maximum number of chunk columns held in memory before LRU eviction.
-pub const DEFAULT_MAX_CACHED_CHUNKS: usize = 2048;
+/// Default maximum number of chunk columns held in memory before LRU eviction (~45 MiB cap).
+pub const DEFAULT_MAX_CACHED_CHUNKS: usize = 256;
 
 /// Snapshot of a dirty chunk `(chunk_x, chunk_z, revision, zlib_payload)` ready for async disk write.
 /// `(dimension, chunk_x, chunk_z, revision, encoded_storage_bytes)` snapshot for async disk saving.
@@ -35,6 +36,18 @@ pub type DirtyChunkSnapshot = (worldgen::DimensionId, i32, i32, u64, Vec<u8>);
 /// Returns the Anvil directory for a given dimension under `base`.
 #[must_use]
 pub fn dimension_dir_for(base: &Path, dim: worldgen::DimensionId) -> PathBuf {
+    let modern = match dim {
+        worldgen::DimensionId::Overworld => {
+            base.join("dimensions").join("minecraft").join("overworld")
+        }
+        worldgen::DimensionId::Nether => {
+            base.join("dimensions").join("minecraft").join("the_nether")
+        }
+        worldgen::DimensionId::End => base.join("dimensions").join("minecraft").join("the_end"),
+    };
+    if base.join("dimensions").join("minecraft").exists() || modern.exists() {
+        return modern;
+    }
     match dim.anvil_subdir() {
         Some(sub) => base.join(sub),
         None => base.to_path_buf(),
@@ -101,6 +114,20 @@ impl LevelMetadata {
             return Self::default();
         };
         let def = Self::default();
+        let spawn_arr = match data.get("spawn") {
+            Some(NbtTag::Compound(sp)) => match sp.get("pos") {
+                Some(NbtTag::IntArray(arr)) if arr.len() >= 3 => Some((arr[0], arr[1], arr[2])),
+                _ => None,
+            },
+            _ => None,
+        };
+        let worldgen_seed = match data.get("WorldGenSettings") {
+            Some(NbtTag::Compound(wg)) => match wg.get("seed") {
+                Some(NbtTag::Long(v)) => Some(*v),
+                _ => None,
+            },
+            _ => None,
+        };
         Self {
             level_name: match data.get("LevelName") {
                 Some(NbtTag::String(s)) => s.clone(),
@@ -108,7 +135,7 @@ impl LevelMetadata {
             },
             random_seed: match data.get("RandomSeed") {
                 Some(NbtTag::Long(v)) => *v,
-                _ => def.random_seed,
+                _ => worldgen_seed.unwrap_or(def.random_seed),
             },
             time: match data.get("Time") {
                 Some(NbtTag::Long(v)) => *v,
@@ -120,15 +147,15 @@ impl LevelMetadata {
             },
             spawn_x: match data.get("SpawnX") {
                 Some(NbtTag::Int(v)) => *v,
-                _ => def.spawn_x,
+                _ => spawn_arr.map_or(def.spawn_x, |s| s.0),
             },
             spawn_y: match data.get("SpawnY") {
                 Some(NbtTag::Int(v)) => *v,
-                _ => def.spawn_y,
+                _ => spawn_arr.map_or(def.spawn_y, |s| s.1),
             },
             spawn_z: match data.get("SpawnZ") {
                 Some(NbtTag::Int(v)) => *v,
-                _ => def.spawn_z,
+                _ => spawn_arr.map_or(def.spawn_z, |s| s.2),
             },
             game_type: match data.get("GameType") {
                 Some(NbtTag::Int(v)) => *v,
@@ -144,6 +171,10 @@ impl LevelMetadata {
     /// Atomically writes `level.dat` as gzipped Named NBT to `<world_dir>/level.dat`.
     pub fn write_atomic(&self, world_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(world_dir)?;
+        let lock_path = world_dir.join("session.lock");
+        if !lock_path.exists() {
+            let _ = std::fs::write(&lock_path, "☃".as_bytes());
+        }
         let mut data = BTreeMap::new();
         data.insert(
             "LevelName".to_owned(),
@@ -157,6 +188,65 @@ impl LevelMetadata {
         data.insert("SpawnZ".to_owned(), NbtTag::Int(self.spawn_z));
         data.insert("GameType".to_owned(), NbtTag::Int(self.game_type));
         data.insert("DataVersion".to_owned(), NbtTag::Int(self.data_version));
+        data.insert("version".to_owned(), NbtTag::Int(19133));
+        data.insert("Difficulty".to_owned(), NbtTag::Byte(2));
+        data.insert("DifficultyLocked".to_owned(), NbtTag::Byte(0));
+        data.insert("initialized".to_owned(), NbtTag::Byte(1));
+        data.insert("allowCommands".to_owned(), NbtTag::Byte(1));
+        data.insert("raining".to_owned(), NbtTag::Byte(0));
+        data.insert("rainTime".to_owned(), NbtTag::Int(0));
+        data.insert("thundering".to_owned(), NbtTag::Byte(0));
+        data.insert("thunderTime".to_owned(), NbtTag::Int(0));
+        data.insert("clearWeatherTime".to_owned(), NbtTag::Int(0));
+        let last_played = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        data.insert("LastPlayed".to_owned(), NbtTag::Long(last_played));
+
+        let mut version_tag = BTreeMap::new();
+        version_tag.insert("Id".to_owned(), NbtTag::Int(self.data_version));
+        version_tag.insert("Name".to_owned(), NbtTag::String("26.3".to_owned()));
+        version_tag.insert("Snapshot".to_owned(), NbtTag::Byte(0));
+        data.insert("Version".to_owned(), NbtTag::Compound(version_tag));
+
+        let mut datapacks = BTreeMap::new();
+        datapacks.insert(
+            "Enabled".to_owned(),
+            NbtTag::List(vec![NbtTag::String("vanilla".to_owned())]),
+        );
+        datapacks.insert("Disabled".to_owned(), NbtTag::List(Vec::new()));
+        data.insert("DataPacks".to_owned(), NbtTag::Compound(datapacks));
+
+        let mut game_rules = BTreeMap::new();
+        for (k, v) in [
+            ("doDaylightCycle", "true"),
+            ("doMobSpawning", "true"),
+            ("doWeatherCycle", "true"),
+            ("keepInventory", "false"),
+            ("mobGriefing", "true"),
+            ("randomTickSpeed", "3"),
+            ("spawnRadius", "10"),
+        ] {
+            game_rules.insert(k.to_owned(), NbtTag::String(v.to_owned()));
+        }
+        data.insert("GameRules".to_owned(), NbtTag::Compound(game_rules));
+
+        let mut dimensions = BTreeMap::new();
+        for dim_key in [
+            "minecraft:overworld",
+            "minecraft:the_nether",
+            "minecraft:the_end",
+        ] {
+            let mut dim_entry = BTreeMap::new();
+            dim_entry.insert("type".to_owned(), NbtTag::String(dim_key.to_owned()));
+            dimensions.insert(dim_key.to_owned(), NbtTag::Compound(dim_entry));
+        }
+        let mut world_gen = BTreeMap::new();
+        world_gen.insert("seed".to_owned(), NbtTag::Long(self.random_seed));
+        world_gen.insert("generate_features".to_owned(), NbtTag::Byte(1));
+        world_gen.insert("bonus_chest".to_owned(), NbtTag::Byte(0));
+        world_gen.insert("dimensions".to_owned(), NbtTag::Compound(dimensions));
+        data.insert("WorldGenSettings".to_owned(), NbtTag::Compound(world_gen));
 
         let mut root = BTreeMap::new();
         root.insert("Data".to_owned(), NbtTag::Compound(data));
@@ -170,6 +260,10 @@ impl LevelMetadata {
         let gz = enc.finish()?;
 
         let path = world_dir.join("level.dat");
+        if path.exists() {
+            let old_path = world_dir.join("level.dat_old");
+            let _ = std::fs::copy(&path, &old_path);
+        }
         let tmp = world_dir.join(format!("level.dat.{}.tmp", std::process::id()));
         std::fs::write(&tmp, gz)?;
         std::fs::rename(&tmp, &path)?;
@@ -181,6 +275,7 @@ impl LevelMetadata {
 pub struct WorldState {
     world_dir: Option<PathBuf>,
     registries: Arc<Version26_3Registries>,
+    light_tables: Arc<anvil::LightTables>,
     worldgen_palette: Option<worldgen::WorldgenPalette>,
     chunks: HashMap<(worldgen::DimensionId, i32, i32), ChunkColumn>,
     protected_chunks: HashSet<(worldgen::DimensionId, i32, i32)>,
@@ -197,11 +292,15 @@ impl WorldState {
         world_dir: Option<PathBuf>,
         registries: Arc<Version26_3Registries>,
     ) -> Self {
+        let light_tables = Arc::new(anvil::LightTables::from_provider(
+            registries.provider().as_ref(),
+        ));
         let worldgen_palette =
             worldgen::WorldgenPalette::from_provider(registries.provider().as_ref()).ok();
         Self {
             world_dir,
             registries,
+            light_tables,
             worldgen_palette,
             chunks: HashMap::new(),
             protected_chunks: HashSet::new(),
@@ -244,9 +343,16 @@ impl WorldState {
         cx: i32,
         cz: i32,
     ) -> LevelChunkWithLight {
-        let registries = Arc::clone(&self.registries);
-        self.get_or_load_mut(dim, cx, cz)
-            .to_packet_with(cx, cz, registries.provider().as_ref())
+        let light_tables = Arc::clone(&self.light_tables);
+        let _ = self.get_or_load_mut(dim, cx, cz);
+        let col = &self.chunks[&(dim, cx, cz)];
+        let neighbors = [
+            self.chunks.get(&(dim, cx - 1, cz)),
+            self.chunks.get(&(dim, cx + 1, cz)),
+            self.chunks.get(&(dim, cx, cz - 1)),
+            self.chunks.get(&(dim, cx, cz + 1)),
+        ];
+        col.to_packet_with_tables_and_neighbors(cx, cz, &light_tables, neighbors)
     }
 
     /// Configures the maximum in-memory chunk cache capacity (clamped to >= 1).
@@ -322,6 +428,178 @@ impl WorldState {
             .set_block(lx, y, lz, state_id)
     }
 
+    fn encode_chunk_for_storage(
+        &self,
+        col: &ChunkColumn,
+        cx: i32,
+        cz: i32,
+    ) -> std::io::Result<Vec<u8>> {
+        col.export_to_vanilla_storage_bytes_with(None, cx, cz, self.registries.provider().as_ref())
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "vanilla Anvil chunk export failed",
+                )
+            })
+    }
+
+    /// Updates Vanilla Anvil `block_entities` on `(dim, cx, cz)` and marks the chunk dirty.
+    pub fn set_chunk_block_entities(
+        &mut self,
+        dim: worldgen::DimensionId,
+        cx: i32,
+        cz: i32,
+        block_entities: Vec<BTreeMap<String, NbtTag>>,
+    ) {
+        let col = self.get_or_load_mut(dim, cx, cz);
+        if col.block_entities != block_entities {
+            col.block_entities = block_entities;
+            col.dirty = true;
+            col.revision = col.revision.wrapping_add(1);
+        }
+    }
+
+    /// Updates Vanilla Anvil `block_ticks` on `(dim, cx, cz)` and marks the chunk dirty.
+    pub fn set_chunk_block_ticks(
+        &mut self,
+        dim: worldgen::DimensionId,
+        cx: i32,
+        cz: i32,
+        block_ticks: Vec<BTreeMap<String, NbtTag>>,
+    ) {
+        let col = self.get_or_load_mut(dim, cx, cz);
+        if col.block_ticks != block_ticks {
+            col.block_ticks = block_ticks;
+            col.dirty = true;
+            col.revision = col.revision.wrapping_add(1);
+        }
+    }
+
+    fn scan_region_metadata_mca<F>(world_dir: &Path, mut on_chunk: F)
+    where
+        F: FnMut(worldgen::DimensionId, &BTreeMap<String, NbtTag>),
+    {
+        use flate2::read::ZlibDecoder;
+        for dim in [
+            worldgen::DimensionId::Overworld,
+            worldgen::DimensionId::Nether,
+            worldgen::DimensionId::End,
+        ] {
+            let region_dir = dimension_dir_for(world_dir, dim).join("region");
+            let Ok(entries) = std::fs::read_dir(&region_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name_str) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if !name_str.starts_with("r.") || !name_str.ends_with(".mca") {
+                    continue;
+                }
+                for compressed in AnvilRegion::read_all_payloads_from_file(&path) {
+                    let mut dec = ZlibDecoder::new(compressed.as_slice()).take(1024 * 1024);
+                    let mut raw = Vec::new();
+                    if dec.read_to_end(&mut raw).is_err() || raw.first() != Some(&0x0A) {
+                        continue;
+                    }
+                    let mut cur = &raw[..];
+                    if let Ok((_, NbtTag::Compound(root))) = decode_named_nbt(&mut cur) {
+                        on_chunk(dim, &root);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scans `region/*.mca` across all dimensions in a single pass and returns `(block_entities, block_ticks)`.
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn load_all_block_entities_and_ticks_from_mca(
+        world_dir: &Path,
+    ) -> (
+        Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)>,
+        Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)>,
+    ) {
+        let mut block_entities = Vec::new();
+        let mut block_ticks = Vec::new();
+        Self::scan_region_metadata_mca(world_dir, |dim, root| {
+            Self::extract_be_and_ticks(dim, root, &mut block_entities, &mut block_ticks);
+        });
+        (block_entities, block_ticks)
+    }
+
+    /// Loads `block_entities` and `block_ticks` for a single chunk `(dim, cx, cz)` from `.mca`.
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn load_chunk_block_entities_and_ticks_from_mca(
+        world_dir: &Path,
+        dim: worldgen::DimensionId,
+        cx: i32,
+        cz: i32,
+    ) -> (
+        Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)>,
+        Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)>,
+    ) {
+        use flate2::read::ZlibDecoder;
+        let mut block_entities = Vec::new();
+        let mut block_ticks = Vec::new();
+        let dim_dir = dimension_dir_for(world_dir, dim);
+        let Ok(Some(compressed)) = AnvilRegion::read_chunk_payload_checked(&dim_dir, cx, cz) else {
+            return (block_entities, block_ticks);
+        };
+        let mut dec = ZlibDecoder::new(compressed.as_slice()).take(1024 * 1024);
+        let mut raw = Vec::new();
+        if dec.read_to_end(&mut raw).is_err() || raw.first() != Some(&0x0A) {
+            return (block_entities, block_ticks);
+        }
+        let mut cur = &raw[..];
+        if let Ok((_, NbtTag::Compound(root))) = decode_named_nbt(&mut cur) {
+            Self::extract_be_and_ticks(dim, &root, &mut block_entities, &mut block_ticks);
+        }
+        (block_entities, block_ticks)
+    }
+
+    fn extract_be_and_ticks(
+        dim: worldgen::DimensionId,
+        root: &BTreeMap<String, NbtTag>,
+        block_entities: &mut Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)>,
+        block_ticks: &mut Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)>,
+    ) {
+        if let Some(NbtTag::List(list)) = root.get("block_entities") {
+            for tag in list {
+                if let NbtTag::Compound(map) = tag {
+                    block_entities.push((dim, map.clone()));
+                }
+            }
+        }
+        if let Some(NbtTag::List(list)) = root.get("block_ticks") {
+            for tag in list {
+                if let NbtTag::Compound(map) = tag {
+                    block_ticks.push((dim, map.clone()));
+                }
+            }
+        }
+    }
+
+    /// Scans `region/*.mca` across all dimensions and returns all Vanilla Anvil `block_entities`.
+    #[must_use]
+    pub fn load_all_block_entities_from_mca(
+        world_dir: &Path,
+        _provider: &dyn rad_core::registry_provider::RegistryProvider,
+    ) -> Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)> {
+        Self::load_all_block_entities_and_ticks_from_mca(world_dir).0
+    }
+
+    /// Scans `region/*.mca` across all dimensions and returns all Vanilla Anvil `block_ticks`.
+    #[must_use]
+    pub fn load_all_block_ticks_from_mca(
+        world_dir: &Path,
+        _provider: &dyn rad_core::registry_provider::RegistryProvider,
+    ) -> Vec<(worldgen::DimensionId, BTreeMap<String, NbtTag>)> {
+        Self::load_all_block_entities_and_ticks_from_mca(world_dir).1
+    }
+
     /// Snapshots dirty non-protected chunks `(dim, cx, cz, revision, encoded_bytes)` for async saving.
     pub fn snapshot_dirty_chunks(&self) -> std::io::Result<Vec<DirtyChunkSnapshot>> {
         if self.world_dir.is_none() {
@@ -330,7 +608,13 @@ impl WorldState {
         let mut out = Vec::new();
         for (&(dim, cx, cz), col) in &self.chunks {
             if col.dirty && !self.protected_chunks.contains(&(dim, cx, cz)) {
-                out.push((dim, cx, cz, col.revision, col.encode_storage_bytes()?));
+                out.push((
+                    dim,
+                    cx,
+                    cz,
+                    col.revision,
+                    self.encode_chunk_for_storage(col, cx, cz)?,
+                ));
             }
         }
         Ok(out)
@@ -353,15 +637,24 @@ impl WorldState {
         let Some(ref dir) = self.world_dir else {
             return Ok(0);
         };
+        let dirty_coords: Vec<(worldgen::DimensionId, i32, i32)> = self
+            .chunks
+            .iter()
+            .filter(|(coord, col)| col.dirty && !self.protected_chunks.contains(*coord))
+            .map(|(coord, _)| *coord)
+            .collect();
         let mut saved = 0usize;
-        for (&(dim, cx, cz), col) in &mut self.chunks {
-            if col.dirty && !self.protected_chunks.contains(&(dim, cx, cz)) {
-                let bytes = col.encode_storage_bytes()?;
-                let dim_dir = dimension_dir_for(dir, dim);
-                AnvilRegion::write_chunk_payload(&dim_dir, cx, cz, &bytes)?;
-                col.dirty = false;
-                saved += 1;
+        for &(dim, cx, cz) in &dirty_coords {
+            let Some(col) = self.chunks.get(&(dim, cx, cz)) else {
+                continue;
+            };
+            let bytes = self.encode_chunk_for_storage(col, cx, cz)?;
+            let dim_dir = dimension_dir_for(dir, dim);
+            AnvilRegion::write_chunk_payload(&dim_dir, cx, cz, &bytes)?;
+            if let Some(col_mut) = self.chunks.get_mut(&(dim, cx, cz)) {
+                col_mut.dirty = false;
             }
+            saved += 1;
         }
         Ok(saved)
     }
@@ -411,7 +704,7 @@ impl WorldState {
                 && col.dirty
                 && !self.protected_chunks.contains(&coord)
                 && let Some(ref dir) = self.world_dir
-                && let Ok(bytes) = col.encode_storage_bytes()
+                && let Ok(bytes) = self.encode_chunk_for_storage(&col, coord.1, coord.2)
             {
                 let dim_dir = dimension_dir_for(dir, coord.0);
                 if let Err(err) =

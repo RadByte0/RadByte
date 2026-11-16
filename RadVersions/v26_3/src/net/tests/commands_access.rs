@@ -1162,3 +1162,145 @@ fn styled_notices_encode_vanilla_translations_and_colors() {
     }
     assert!(gamemode_notice(4).is_none());
 }
+
+#[test]
+fn declare_commands_includes_subcommands_suggestions_and_filters_by_permission() {
+    let lvl0 = commands::build_declare_commands_for_level(0);
+    let root_literals = |dc: &DeclareCommands| -> Vec<String> {
+        dc.nodes[0]
+            .children
+            .iter()
+            .filter_map(|idx| match &dc.nodes[idx.0 as usize].kind {
+                CommandNodeKind::Literal { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let cmds0 = root_literals(&lvl0);
+    assert!(cmds0.contains(&"help".to_owned()));
+    assert!(cmds0.contains(&"dimension".to_owned()));
+    assert!(!cmds0.contains(&"gamemode".to_owned()));
+    assert!(!cmds0.contains(&"op".to_owned()));
+    assert!(!cmds0.contains(&"stop".to_owned()));
+
+    let dim_children: Vec<String> = lvl0
+        .nodes
+        .iter()
+        .find(|n| matches!(&n.kind, CommandNodeKind::Literal { name } if name == "dimension"))
+        .unwrap()
+        .children
+        .iter()
+        .filter_map(|idx| match &lvl0.nodes[idx.0 as usize].kind {
+            CommandNodeKind::Literal { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dim_children, vec!["overworld", "nether", "end"]);
+
+    let lvl2 = commands::build_declare_commands_for_level(2);
+    let cmds2 = root_literals(&lvl2);
+    assert!(cmds2.contains(&"gamemode".to_owned()));
+    assert!(cmds2.contains(&"give".to_owned()));
+    assert!(!cmds2.contains(&"op".to_owned()));
+    assert!(!cmds2.contains(&"stop".to_owned()));
+    assert!(lvl2.nodes.iter().any(|n| {
+        matches!(&n.kind, CommandNodeKind::GreedyStringArg { name } if name == "item")
+            && n.suggestions_type.as_deref() == Some("minecraft:ask_server")
+    }));
+
+    let lvl4 = commands::build_declare_commands_for_level(4);
+    let cmds4 = root_literals(&lvl4);
+    assert!(cmds4.contains(&"op".to_owned()));
+    assert!(cmds4.contains(&"whitelist".to_owned()));
+    assert!(cmds4.contains(&"stop".to_owned()));
+}
+
+#[tokio::test]
+async fn command_suggestions_are_filtered_by_permissions_and_suggest_arguments() {
+    let dir = temp_test_dir("cmd-suggestions");
+    let cfg = test_server_config(&dir);
+    let mut state = ServerState::new(cfg, Arc::new(World::flat(2, 0)));
+    state.access = RwLock::new({
+        let mut ac = AccessControl::default();
+        ac.add_op(None, "ModUser".into(), 2);
+        ac.add_op(None, "AdminUser".into(), 3);
+        ac
+    });
+
+    // Regular player (level 0): "/" only shows level 0 commands, "/gamemode " yields no suggestions
+    let resp0 = commands::build_command_suggestions(
+        &state,
+        "GuestUser",
+        None,
+        &CommandSuggestionsRequest {
+            id: VarInt(1),
+            text: "/".into(),
+        },
+    )
+    .await;
+    let names0: Vec<&str> = resp0.matches.iter().map(|m| m.text.as_str()).collect();
+    assert!(names0.contains(&"help"));
+    assert!(names0.contains(&"dimension"));
+    assert!(!names0.contains(&"gamemode"));
+    assert!(!names0.contains(&"op"));
+    assert!(resp0.matches.iter().all(|m| m.tooltip.is_some()));
+
+    let denied_arg = commands::build_command_suggestions(
+        &state,
+        "GuestUser",
+        None,
+        &CommandSuggestionsRequest {
+            id: VarInt(2),
+            text: "/gamemode ".into(),
+        },
+    )
+    .await;
+    assert!(denied_arg.matches.is_empty());
+
+    // Level 2 user: "/gamemode cr" suggests "creative" at start=10, length=2; "/op " is still empty
+    let gm_resp = commands::build_command_suggestions(
+        &state,
+        "ModUser",
+        None,
+        &CommandSuggestionsRequest {
+            id: VarInt(3),
+            text: "/gamemode cr".into(),
+        },
+    )
+    .await;
+    assert_eq!(gm_resp.start, VarInt(10));
+    assert_eq!(gm_resp.length, VarInt(2));
+    assert_eq!(gm_resp.matches.len(), 1);
+    assert_eq!(gm_resp.matches[0].text, "creative");
+
+    let denied_op = commands::build_command_suggestions(
+        &state,
+        "ModUser",
+        None,
+        &CommandSuggestionsRequest {
+            id: VarInt(4),
+            text: "/op ".into(),
+        },
+    )
+    .await;
+    assert!(denied_op.matches.is_empty());
+
+    // Level 3 user: "/whitelist " suggests all subcommands
+    let wl_resp = commands::build_command_suggestions(
+        &state,
+        "AdminUser",
+        None,
+        &CommandSuggestionsRequest {
+            id: VarInt(5),
+            text: "/whitelist ".into(),
+        },
+    )
+    .await;
+    let wl_names: Vec<&str> = wl_resp.matches.iter().map(|m| m.text.as_str()).collect();
+    for expected in ["add", "list", "off", "on", "reload", "remove"] {
+        assert!(wl_names.contains(&expected));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

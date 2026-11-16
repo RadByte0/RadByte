@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "rad-api"
-version = "0.1.0"
+version = "0.1.2"
 
 [[package]]
 name = "radon-guest-proxy"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "rad-api",
 ]
