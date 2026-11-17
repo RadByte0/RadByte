@@ -8,7 +8,7 @@ Date: November 15, 2026. This is a technical investigation, not a legal assessme
 
 - FILE_REVIEW_CURRENT.csv: one record for each of the 206 files outside output directories and local third-party installations; the entire file was automatically read, SHA-256 computed, text markers and line numbers identified. This is not a manual legal review of each line and not a confirmation of authorship.
 - LOCAL_ARTIFACTS_INDEX.csv: 55,337 paths/sizes in `target`, nested `target`, `artifacts`, `dist`, `versions`, `Paper-26.3`; metadata only, contents, nested archives, and rights were not separately reviewed.
-- FILE_REVIEW_SUMMARY.json: statistics and recorded limitations. The scanner [audit_file_provenance.py](../../scripts/legal/audit_file_provenance.py) is available for re-execution; its own outputs are intentionally not scanned to avoid self-reference.
+- FILE_REVIEW_SUMMARY.json: statistics and recorded limitations. Rerun the scanner with `cargo run -p rad-tools -- audit-provenance`; its own outputs are intentionally not scanned to avoid self-reference.
 - Automated categories: 8 explicitly defined sources or derived registries require separate legal review; 7 local configs/data should be preserved and not accidentally included; 191 other files have unverified authorship and rights based on this scan. This is not an allegation of infringement or third-party ownership. Markers neither prove nor disprove copying.
 - The state was captured prior to the creation of this report; a re-run will cover it as well. For the current release, a fresh scan with hashes is required.
 

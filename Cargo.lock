@@ -1259,6 +1259,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rad-tools"
+version = "0.3.1"
+dependencies = [
+ "rad-core",
+ "regex",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "rad-version"
 version = "0.3.1"
 dependencies = [

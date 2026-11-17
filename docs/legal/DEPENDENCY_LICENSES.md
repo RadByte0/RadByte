@@ -1,6 +1,6 @@
 # Dependency Licenses & Provenance Scan Summary
 
-> **Note:** This document is a technical inventory generated from repository tooling (`cargo metadata --format-version 1 --locked` and `scripts/legal/audit_file_provenance.py`). It is **not** legal advice and does not establish legal cleanliness or copyright clearance.
+> **Note:** This document is a technical inventory generated from repository tooling (`cargo metadata --format-version 1 --locked` and a provenance marker scan, now `cargo run -p rad-tools -- audit-provenance`). It is **not** legal advice and does not establish legal cleanliness or copyright clearance.
 
 ## 1. Workspace License Declaration
 - `Cargo.toml` declares `license = "MIT OR Apache-2.0"`.
@@ -33,7 +33,9 @@ Observed via `cargo metadata --format-version 1 --locked` (filtering packages wh
 | `(MIT OR Apache-2.0) AND Unicode-3.0` | 1 |
 | `CDLA-Permissive-2.0` | 1 |
 
-## 3. Automated Provenance Scan (`scripts/legal/audit_file_provenance.py`)
+## 3. Automated Provenance Scan
+
+The scanner can be rerun with `cargo run -p rad-tools -- audit-provenance`.
 Last run output:
 - `source_files_scanned`: `174`
 - `source_statuses`: `{"AUTHORSHIP_AND_RIGHTS_UNVERIFIED": 169, "LOCAL_DATA_REVIEW": 5}`

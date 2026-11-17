@@ -6,6 +6,7 @@ members = [
     "RadLimbo",
     "RadProxy",
     "RadServer",
+    "RadTools",
     "RadVersions/common",
     "RadVersions/v26_3",
 ]

@@ -1,113 +1,87 @@
-# RadByte — High-Performance Minecraft 26.3 (Protocol `777`) Ecosystem in Rust
+<div align="center">
 
-**RadByte** is a fast, modular server ecosystem for Minecraft Java Edition **26.3** (protocol **`777`**), written in Rust with a focus on low memory consumption (`mimalloc`), a clean protocol layer, and WASM extensions (`wasmi`).
+# RadByte
 
-**NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
+**A modular Minecraft Java server project, written in Rust.**
 
-Current versioned data and certain tables have provenance that still requires
-verification prior to public distribution. This is not a complete clean-room implementation:
-see the [provenance audit and independent development plan](docs/PROVENANCE_CLEAN_ROOM.md).
-Publication is currently blocked pending verification of code and data rights; `.gitignore`
-excludes known data of unconfirmed provenance, so a copy cloned solely
-from Git may not support a normal build or operation with a real client.
+[Downloads](https://github.com/RadByte0/RadByte/releases) · [Getting started](#getting-started) · [Documentation](docs/DOCS_INDEX.md) · [Support](#support-the-project)
 
-Configuration templates are stored in `config/templates/`. For local startup, use `./scripts/Start-RadByte.ps1`: working configs, worlds, access lists, and plugins will be stored in `dist/RadServer/`. Packaging creates separate working directories in `dist/`.
+</div>
 
-## GitHub Release downloads
+RadByte brings together a game server, a proxy, and a lightweight fallback server. It is an actively developed project for people who want to experiment with a Rust-based Minecraft Java server stack.
 
-Each release provides separate `rad-server`, `rad-proxy`, `rad-limbo` and version library files. Choose files with the same target suffix: `x86_64` or `aarch64`, and Windows, Linux or macOS. The library is platform-specific (`.dll`, `.so`, or `.dylib`); it cannot be shared across operating systems. GitHub displays SHA-256 hashes on release assets. On Linux and macOS, make downloaded executables runnable with `chmod +x <filename>`.
+> **Project status:** RadByte targets Minecraft Java **26.3**, protocol **777**. Compatibility and gameplay are still being developed; do not assume complete vanilla behavior or production readiness. Version data and parts of the existing project have unresolved provenance. Review the [provenance audit](docs/PROVENANCE_CLEAN_ROOM.md) before redistributing or relying on the project.
 
-RadServer also needs compatible version data which is not included in the release. Obtain `blocks.json`, `items.json`, `entities.json`, and `menus.json` separately, with rights appropriate to your use. On Windows, the GUI offers version setup on first launch. For manual setup, use the repository's `scripts/generate_version_package.ps1` with PowerShell 7 from the server's working directory (replace the paths with your own):
+RadByte is an independent project. It is **not an official Minecraft product** and is not approved by or associated with Mojang or Microsoft.
 
-```powershell
-pwsh <repository>/scripts/generate_version_package.ps1 -DataDir <data-directory> -LibraryPath <downloaded-library> -OutDir ./versions/26.3
+## Choose a component
+
+| Component | What it does |
+| --- | --- |
+| **RadServer** | Hosts a game server through a version-specific native library. On Windows it includes a desktop console and resource dashboard. |
+| **RadProxy** | Routes Minecraft connections and supports Radons, the project's WebAssembly extensions. |
+| **RadLimbo** | Provides a lightweight fallback server. |
+
+## Getting started
+
+1. Open the [latest release](https://github.com/RadByte0/RadByte/releases/latest) and choose **RadServer**, **RadProxy**, or **RadLimbo**.
+2. Download the file for your operating system and processor: `x86_64` for most Intel/AMD computers or `aarch64` for ARM computers. Windows files end in `.exe`.
+3. Put each component in its own folder before starting it. It creates or reads configuration and runtime files in its working directory.
+
+### RadServer
+
+RadServer also needs a **compatible version data package**, which is not included in the release. You must supply `blocks.json`, `items.json`, `entities.json`, and `menus.json` yourself; `tags.json` is optional. The data must match the supported version and its provenance and rights should be appropriate for your use. The executable and library alone are not a complete installation.
+
+On **Windows**, open `rad-server-…exe`. If no usable package is installed, the version setup screen lets you choose 26.3 and a local data folder. It downloads the matching version library from the same release and verifies its SHA-256 against GitHub's release metadata. The dashboard opens after setup.
+
+For terminal mode on Windows, pass `--nogui`:
+
+```text
+rad-server-x86_64-pc-windows-msvc.exe --nogui
 ```
 
-This creates `versions/version.toml` and `versions/26.3/` with the library, data and manifest. **It replaces an existing `versions/26.3` directory**; add `-BackupExisting` to preserve the previous package. Start the downloaded server from that working directory, using `--nogui` for terminal mode. Release assets are individual downloads; GitHub Actions workflow artifacts are separately packaged by GitHub for download.
+On **Linux and macOS**, RadServer runs in the terminal. Download the matching `rad-version-26.3-…` library as well; Linux uses `.so` and macOS uses `.dylib`. Make the executable runnable with `chmod +x <server-file>`. Prepare the package with the Rust tool below, then start the server from the same working directory.
 
-When an existing valid version package is missing its library, a tagged RadServer release can download the matching library from the same GitHub release. It checks the library's size and SHA-256 against the existing package manifest before installing it. This does not create the package or supply missing version data. RadProxy does not require this library, and RadLimbo does not load it.
+### Prepare a version package manually
 
-## Repository Structure
+From the server's working directory, with a source checkout and Rust installed, run:
 
-| Crate | Purpose | Config |
-| :--- | :--- | :--- |
-| [`RadCore`](RadCore) | Shared core: `VarInt`/`VarLong`, Network NBT, codec, `AES-128-CFB8`, `Velocity Modern Forwarding`, MC 26.3 packets, CLI utilities | — |
-| [`RadAPI`](RadAPI) | Stable SDK (`v1`) for native and `.wasm` plugins (Radons) for `RadProxy` and `RadServer` | — |
-| [`RadProxy`](RadProxy) | High-performance L7 proxy, `IpFilter`, `bungeecord:main`, `/metrics`, `DeclareCommands`, WASM radons | [`rad.properties`](config/templates/RadProxy/rad.properties) |
-| [`RadLimbo`](RadLimbo) | Ultra-lightweight limbo/fallback server (`Login → Configuration → Play`) | [`rad.properties`](config/templates/RadLimbo/rad.properties) |
-| [`RadServer`](RadServer) | Version module host-launcher: reads `versions/version.toml`, verifies manifest/ABI/SHA-256, and loads the version library | [`rad.properties`](config/templates/RadServer/rad.properties) |
-| [`RadVersions/common`](RadVersions/common) | `rad-version` crate: version descriptors (`MC_26_3`), world compatibility checks (`WorldMechanicsProfile`, `level.dat`), safe backup, shared `shapes`/`physics` | — |
-| [`RadVersions/v26_3`](RadVersions/v26_3) | Standalone Minecraft 26.3 implementation (`protocol 777`, C ABI v1 `rad_version_26_3`): 20 TPS, chunks/Anvil `.mca`, inventory, simulation/redstone, survival, mob AI, `RadAPI v1` WASM | — |
-
-Additionally:
-- [`docs/`](docs) — [documentation index](docs/DOCS_INDEX.md), architecture, configuration, domain plans, and provenance audit materials.
-- [`scripts/`](scripts) — scripts for verification (`verify.ps1`) and isolated packaging into `dist/` (`package.ps1`).
-
-## Standalone Service Startup and Testing
-
-To avoid mixing configs, `world/`, and binaries in a single `target/release/` directory, build and stage each service into its own isolated `dist/<Service>/` folder:
-
-```powershell
-.\scripts\Build.ps1 -DataPackage <path-to-compatible-data-package>
+```text
+cargo run --manifest-path <checkout>/Cargo.toml --locked -p rad-tools -- package-version <data-directory> <library-file> <versions-directory>
 ```
 
-Without `-DataPackage`, binary files (`rad-server`, `rad-proxy`, `rad-limbo`) are built and staged without the `versions/26.3/` data package (running `RadServer` requires an explicit compatible data package).
+For example, set `<versions-directory>` to `./versions` while working in the server folder. The tool validates the data and library, then creates `versions/version.toml` and `versions/26.3/` with the package manifest. It refuses to overwrite an existing `26.3` package. The library must match the operating system and architecture on which the package is prepared.
 
-Afterwards, each component can be run and tested completely independently:
+RadProxy does not need the version library. RadLimbo can use a compatible local data package but does not load the version library.
 
-```powershell
-cd dist\RadServer
-.\rad-server.exe
+## Build from source
+
+Install a recent stable Rust toolchain and a native compiler for your platform, then run:
+
+```text
+cargo build --workspace --release --locked
 ```
 
-On Linux/macOS, the executable is named `./rad-server` (`cargo build --workspace --release` places binaries in `target/release/`, and `versions/26.3/` and configs must be copied alongside; building and running on Linux/macOS have not been verified in the current Windows environment). A separate `libraries/` directory is not created, as Rust dependencies are linked statically into a single executable, while addons are located in `radons/` and `radonfigs/`.
+Cargo places the binaries and native version library in `target/release/`. Building does **not** include the externally supplied version data or automatically create a complete server installation. On Windows, the existing `scripts/Build.ps1` can still prepare separate local `dist/` folders; the Rust tools are being introduced to replace script-based workflows without discarding existing functionality.
 
-Structure of `dist/RadServer/`:
-- `rad-server.exe` (`rad-server` on Linux/macOS), `rad.properties`, `config/radserver-extra.properties`
-- `versions/26.3/version.json` and `versions/26.3/data/{items,blocks,entities,menus}.json` (validated at startup before opening the port; can be regenerated via `.\scripts\generate_version_package.ps1`)
-- `versions/version.toml` — Minecraft version selection, for example `version = "26.3"`. The current build only supports 26.3; setting or choosing another number does not add support for it on its own. Quotes are required so the number is not parsed as a TOML number.
-- `radons/`, `radonfigs/`, `world/`
+Useful checks:
 
-Similarly for `dist\RadProxy\` and `dist\RadLimbo\`.
-
-## Whitelist, Operators (`op`), and `rad.properties` Configuration (MC 26.3)
-
-The game mode is specified with words: `gamemode=survival`, `creative`, `adventure`, or `spectator`. The legacy `game-mode` name and numeric values remain available for backwards compatibility. For an already saved player, the setting is enforced when `force-gamemode=true`. RadByte-specific settings are located in `config/radserver-extra.properties`.
-
-A complete mapping table from `server.properties` (Minecraft Java 26.3) parameters to `rad.properties` is provided in [`docs/VANILLA_26_3_PROPERTIES.md`](docs/VANILLA_26_3_PROPERTIES.md).
-
-### How to Enable the Whitelist, Add Yourself, and Grant the First `op`
-
-1. In [`rad.properties`](config/templates/rad.properties), enable the whitelist (by default in the test profile `white-list=false`, whereas in vanilla 26.3 `white-list = true`):
-   ```toml
-   white-list=true
-   enforce-whitelist=false
-   op-permission-level=4
-   ```
-2. Start `RadServer` (or the network via `dist\scripts\Start-RadByte.ps1 -Profile Network`).
-3. In the `RadServer` console (permission level `4`), run:
-   ```text
-   whitelist add <YourNicknameOrUUID>
-   op <YourNicknameOrUUID>
-   ops
-   save-all
-   ```
-   Or enable/reload the list without restarting:
-   ```text
-   whitelist on
-   whitelist reload
-   whitelist list
-   ```
-4. With a player holding level `3+` `op`, in-game commands `/op <player> [1..4]`, `/deop <player>`, `/ops`, `/whitelist <on|off|list|reload|add|remove>`, `/kick`, `/ban`, and `/pardon` are available; at level `4`, `/save`, `/reload`, and `/stop` are available. The client automatically receives a filtered command tree (`DeclareCommands`) matching its permission level.
-
-`ops.json` and `whitelist.json` are stored in the RadServer working directory alongside `rad.properties` as JSON arrays. Operator entries contain `uuid`, `name`, `level`, and `bypassesPlayerLimit`; whitelist entries contain `uuid` and `name`. The `bypassesPlayerLimit` value is preserved on import, but does not yet control bypassing the player limit. For names added without a known UUID, the entry may temporarily lack a `uuid` and is not fully compatible with Paper. On first save, existing entries from `world/access_control.json` or legacy `world/ops.json` and `world/whitelist.json` are migrated without deleting the source files. Existing files alongside the config take precedence. Edit lists after stopping the server; `whitelist reload` re-reads the whitelist without overwriting operators.
-
-## Quality Assurance and Testing
-
-For a release build of all services and automatic updates to `dist/`, stop the services and run `./scripts/Build.ps1`. Server startup: `./scripts/Start-RadByte.ps1`; entire network: `./scripts/Start-RadByte.ps1 -Profile Network`. `cargo build` on its own does not package `dist`. The standard `cargo build` command writes results to `target`, following default Cargo behavior.
-
-```powershell
-.\scripts\verify.ps1
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
 ```
 
-Runs `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo doc --workspace --no-deps`.
+The repository excludes some data of unconfirmed provenance, and some local or integration tests need additional data. A successful build does not establish legal clearance or complete client compatibility.
+
+## Configuration and documentation
+
+Configuration templates live in [`config/templates/`](config/templates/). Each service uses its own `rad.properties`; RadServer has additional settings in `config/radserver-extra.properties`. See the [documentation index](docs/DOCS_INDEX.md) for architecture, configuration, and development notes. Back up worlds and configuration before trying a new build.
+
+## Support the project
+
+If RadByte is useful to you, you can support AnarchByte through [Ko-fi](https://ko-fi.com/anarchbyte), [Buy Me a Coffee](https://buymeacoffee.com/anarchbyte), or [GitHub Sponsors](https://github.com/sponsors/AnarchByte0).
+
+## License and provenance
+
+The workspace declares **MIT OR Apache-2.0**; see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). Third-party dependencies have their own licenses, and the declarations do not resolve the outstanding provenance questions for project code or version data. See [the provenance audit](docs/PROVENANCE_CLEAN_ROOM.md) and [dependency inventory](docs/legal/DEPENDENCY_LICENSES.md).
