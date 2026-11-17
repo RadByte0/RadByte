@@ -9,11 +9,11 @@
 - `RadVersions/v26_3/` — isolated implementation of **Minecraft Java 26.3 (protocol 777)** (`rad-version-26-3` / `rad_version_26_3` `cdylib`+`rlib`), owning 26.3-specific world generation, gameplay handlers, `Play` session loop, and `verify_mc777_tables()`.
 - `RadProxy/`, `RadLimbo/` — proxy and limbo server crates.
 
-## 2. Release Layout (`dist/RadServer/`)
+## 2. Example RadServer Working Directory
 
 ```text
-dist/RadServer/
-├── rad-server.exe
+RadServer/
+├── rad-server[.exe]
 ├── rad.properties
 ├── versions/
 │   ├── version.toml              # User selection: version = "26.3"
@@ -25,7 +25,7 @@ dist/RadServer/
 │           ├── blocks.json
 │           ├── entities.json
 │           └── menus.json
-└── world/                        # Never overwritten by packaging scripts
+└── world/                        # User data; keep backups before changes
 ```
 
 ## 3. Version Selection & Launch Contract
@@ -43,7 +43,7 @@ dist/RadServer/
 
 1. Create `RadVersions/v<major>_<minor>/` as a new `cdylib` + `rlib` crate depending on `../../RadCore`, `../common`, and `../../RadAPI`, and register it in root `Cargo.toml`.
 2. Export `rad_version_abi_version`, `rad_version_info`, and `rad_version_run_server` matching `RadCore::version_package` C ABI v1.
-3. Add verified versioned registry data and call `scripts/generate_version_package.ps1` with `-GameVersion`, `-ProtocolVersion`, `-WorldDataVersion`, `-LibName`, `-DataDir`, and `-SourceLabel`.
+3. Add verified versioned registry data and use the Rust `rad-tools package-version` command for the currently supported 26.3 package. Supporting another version requires extending the Rust packager and validating that version's protocol and data first.
 4. Do not copy `RadVersions/v26_3/` under another version number without implementing and verifying that version's protocol and data.
 
 ## 5. World Compatibility & Backups
@@ -57,10 +57,11 @@ dist/RadServer/
 
 Run the full verification gate:
 
-```powershell
-cargo fmt --all
-$env:RUST_LOG = "warn"
-powershell -ExecutionPolicy Bypass -File scripts\verify.ps1
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo doc --workspace --no-deps
 ```
 
-`scripts/package.ps1` preserves existing `dist/RadServer/versions/version.toml`, `rad.properties`, `radserver.toml`, and `world/` directories while updating binaries and `versions/26.3/`.
+`cargo build --workspace --release --locked` places executables and the native library under `target/release/`. It does not assemble a runtime directory or include the separately supplied version data. The Rust `rad-tools package-version` command creates a new `versions/26.3/` package and refuses to overwrite an existing package. Keep worlds and configuration in a separate working directory and make backups before replacing files.

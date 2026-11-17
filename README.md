@@ -62,7 +62,7 @@ Install a recent stable Rust toolchain and a native compiler for your platform, 
 cargo build --workspace --release --locked
 ```
 
-Cargo places the binaries and native version library in `target/release/`. Building does **not** include the externally supplied version data or automatically create a complete server installation. On Windows, the existing `scripts/Build.ps1` can still prepare separate local `dist/` folders; the Rust tools are being introduced to replace script-based workflows without discarding existing functionality.
+Cargo places the binaries and native version library in `target/release/`. Building does **not** include the externally supplied version data or create a complete server installation. Run each service from its own working directory with its configuration and required version package in place. The repository uses Cargo for builds and tests; it does not include shell-based build or runtime scripts.
 
 Useful checks:
 

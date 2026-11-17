@@ -163,7 +163,7 @@ mapping errors feature automated diagnostics, and unsupported actions are visibl
    large/malformed packets, limits, atomicity, lock ordering, bounded queues.
 3. Load testing: large numbers of item entities and active chunks; measure TPS,
    memory, queues, and restart duration without infinite loops.
-4. `scripts/verify.ps1`, release, and version package; verify consistency of
+4. ``cargo test --workspace --locked``, release, and version package; verify consistency of
    `.exe`, DLL, and data. Scripts may update `dist`: verify them prior to
    execution, stop server cleanly if required, do not force-kill on hang.
 5. Real 26.3 client: Q, Ctrl+Q, pickup, inventory, placement/breaking of

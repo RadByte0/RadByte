@@ -10,7 +10,7 @@ Distinct criteria: NU-independent build; operational capability with a compatibl
 
 ## What Currently Depends on NU
 
-`scripts/package.ps1` creates a temporary copy of the source tree and supplements it with the following files:
+``cargo build --workspace --release --locked`` creates a temporary copy of the source tree and supplements it with the following files:
 
 | Material in NU | Current Usage | Replacement |
 | --- | --- | --- |
@@ -67,8 +67,8 @@ Done when code compiles cleanly without this data, and every consumed full packa
 
 ## 6. Streamline Build and Packaging
 
-- Remove tree supplementation from `NU`, temporary source code copies, and assumptions about legacy local directories from `scripts/package.ps1`.
-- Build the main workspace via `scripts/Build.ps1`. Align `scripts/verify.ps1`, examples, and CI to the same data contract.
+- Remove tree supplementation from `NU`, temporary source code copies, and assumptions about legacy local directories from ``cargo build --workspace --release --locked``.
+- Build the main workspace via ``cargo build --workspace --release --locked``. Align ``cargo test --workspace --locked``, examples, and CI to the same data contract.
 - Separate binary/DLL compilation from bundling the verified data package. Local package assembly for testing all services should be achieved in a single command with an explicit package path.
 - Keep services, runtime operational files, and management `scripts/` in `dist`. Store reports, build manifest, and version backups in `target/`. Do not overwrite saved worlds or configuration files.
 - Clear the `quarantined_inputs` flag only after verified physical removal of those inputs; evaluate publication eligibility independently.
@@ -81,7 +81,7 @@ Execute in a clean, isolated directory with an empty Cargo target, free of `NU`,
 - [x] Build and packaging do not read `NU` or search for it via absolute paths, environment variables, or scripts.
 - [x] RadServer, RadProxy, RadLimbo, version DLLs, and valid manifests are produced when supplied with an explicit compatible package.
 - [ ] Direct status/Configuration/Play, network status, and proxy login succeed; GUI client launch verified separately or honestly marked unverified. *(Services start and bind ports, but network probes for Status/Configuration/Play and proxy login were interrupted and not completed; `NU/RadCore/data/mc777` also does not contain `tags.json`, so Configuration without a full package containing `tags.json` is rejected; GUI client was not tested.)*
-- [ ] Shutdown, restart, world saving, and backup/restore succeed on a dedicated test world. *(Saving test world of `11` files and backup creation via `Backup-RadByte.ps1` (`5` files) verified; restart and `restore` not completed.)*
+- [ ] Shutdown, restart, world saving, and backup/restore succeed on a dedicated test world. *(Saving test world of `11` files and backup creation via `Rust-based world backup verification` (`5` files) verified; restart and `restore` not completed.)*
 - [x] Missing, corrupted, and incompatible data packages are rejected prior to accepting players or mutating world state.
 - [ ] Provenance of new code, test fixtures, and data recorded; unresolved distribution questions remain explicit. *(Evidence `PROVENANCE.json` preserved in `docs/legal/evidence/PROVENANCE.json`, but `mc777` data distribution rights remain `NOT_DETERMINED`, and the source for `tags.json` has not yet been selected.)*
 

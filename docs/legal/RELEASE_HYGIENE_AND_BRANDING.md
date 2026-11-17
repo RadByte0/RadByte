@@ -12,7 +12,7 @@
 ## 2. Secrets, Tokens, Configurations, and Worlds
 
 - In the source code of `RadLimbo` and `RadProxy`, only test/template values for `forwarding_secret` are used (`"change-me-radbyte-secret"`, `"limbo-test-secret"`). No real production secrets were found in the code.
-- In [scripts/package.ps1](../../scripts/package.ps1), when generating new configs in `dist/`, a random local 16-byte `forwarding_secret` is generated — therefore, after a local run, the `dist/` directory **must not** be published as a ready archive without cleanup.
+- In [`cargo build --workspace --release --locked`](../../`cargo build --workspace --release --locked`), when generating new configs in `dist/`, a random local 16-byte `forwarding_secret` is generated — therefore, after a local run, the `dist/` directory **must not** be published as a ready archive without cleanup.
 - All `.jar` files in the workspace are located exclusively in `Paper-26.3/` (which is excluded in `.gitignore` and in staging).
 
 ## 3. `.gitignore` Verification

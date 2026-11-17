@@ -115,7 +115,7 @@ fully implemented, explicitly marked as unsupported, or omitted.
   login, movement, dimension change, resource pack, and negative cases as needed.
 - Migration tests for existing configs, world, and playerdata; secret safety
   and DoS protection; endurance tests for simulation and restarts.
-- `scripts/verify.ps1`, release build, and launch verification from `dist` in
+- ``cargo test --workspace --locked``, release build, and launch verification from `dist` in
   a temporary directory. Do not alter the production/active world during automated tests.
 - Update `README`, documentation, examples, compatibility matrix, and changelog;
   candidly designate missing features and unverified checks.

@@ -125,7 +125,7 @@ into the client; client-side prediction, if needed, is a verified separate model
 
 ## 7. Migration of Current RadVersion26_3
 
-1. Review AGENTS.md, current changes, processes, and baseline `verify.ps1`;
+1. Review AGENTS.md, current changes, processes, and baseline ``cargo test --workspace --locked``;
    preserve third-party changes. Establish 26.3 startup, version package, RadAPI,
    direct/proxy/limbo, and world restart as behavioral baseline tests.
 2. Map dependencies and compile version-specific/global inventories: constants,
@@ -164,7 +164,7 @@ into the client; client-side prediction, if needed, is a verified separate model
   world clock, backup/restore, protection against invalid or newer formats.
 - Measure and record baseline login latency/TPS/memory; verify timeout,
   non-blocking network, concurrency, and cancellation.
-- `scripts/verify.ps1`, isolated smoke tests, and consistent release build;
+- ``cargo test --workspace --locked``, isolated smoke tests, and consistent release build;
   the script may update `dist` and terminate the server, verify this in advance.
   Do not overwrite working worlds/configs/addons; leave startup to the user.
 

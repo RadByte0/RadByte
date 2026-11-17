@@ -57,7 +57,7 @@ the entire content of the old DLL into `v26_3` under a new name, preserving dupl
 
 1. Read applicable AGENTS.md, check Git/its absence, running processes,
    current changes, and versions of `.exe`, DLL, and data. Do not overwrite others' work.
-2. Review `scripts/verify.ps1` and related scripts: they may modify
+2. Review ``cargo test --workspace --locked`` and related scripts: they may modify
    `dist` and terminate the server. Preserve baseline tests and failures; do not display
    secrets or inventory contents in logs.
 3. Map dependencies and usages of `PROTOCOL_VERSION`, version package,
@@ -178,7 +178,7 @@ the entire content of the old DLL into `v26_3` under a new name, preserving dupl
 ## M7. Acceptance
 
 - Full verification of `fmt`, `clippy -D warnings`, workspace tests, docs,
-  `scripts/verify.ps1`, release build, and isolated `dist` smoke tests.
+  ``cargo test --workspace --locked``, release build, and isolated `dist` smoke tests.
 - Official 26.3 client: status → login → configuration → Play, movement,
   inventory, blocks, time, save/restart; proxy/limbo if supported.
 - Unsupported protocol safely rejected; version package and

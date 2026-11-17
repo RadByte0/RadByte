@@ -42,7 +42,7 @@ Headless test results do not replace verification with a real client.
    Verify actual behavior and negative scenarios.
 5. Do not output secrets to logs and artifacts. Do not assume Mojang authentication
    for offline/direct mode. Describe formats and security models honestly.
-6. After substantial changes, run targeted tests and `scripts/verify.ps1`;
+6. After substantial changes, run targeted tests and ``cargo test --workspace --locked``;
    before updating `dist`, check whether the script triggers packaging or
    stops the current server. Do not forcefully terminate the server if it hangs.
 7. The executor continues independent tasks across stages; do not stop
@@ -206,7 +206,7 @@ with vanilla. Do not treat a registry entry as a completed gameplay feature.
 
 ## Release Criteria for Testing
 
-- `scripts/verify.ps1` and release build pass; isolated direct and
+- ``cargo test --workspace --locked`` and release build pass; isolated direct and
   proxy smoke tests are executed, or unavailable checks are explicitly stated.
 - Real Minecraft 26.3 connects without protocol error, remains connected,
   moves, sees chunks at `view-distance=12`, with working permissions/commands.

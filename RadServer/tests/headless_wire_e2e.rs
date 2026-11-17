@@ -1455,32 +1455,46 @@ async fn headless_production_persistence_shutdown_crash_backup_restore() {
         let _ = child.wait();
     }
 
-    // 3. Backup & Restore using dist/Backup-RadByte.ps1 into restored_world_dir
-    let backup_script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("dist")
-        .join("Backup-RadByte.ps1");
-    let status = std::process::Command::new("powershell")
-        .args([
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            backup_script.to_str().unwrap(),
-            "-WorldDir",
-            world_dir.to_str().unwrap(),
-            "-BackupDir",
-            backup_dir.to_str().unwrap(),
-            "-RestoreTo",
-            restored_world_dir.to_str().unwrap(),
-            "-AllowLive",
-        ])
-        .status()
-        .expect("invoke Backup-RadByte.ps1");
-    assert!(
-        status.success(),
-        "Backup-RadByte.ps1 restore verification must succeed"
-    );
+    // 3. Exercise the backup copy and restore in Rust, without a shell dependency.
+    fn copy_tree(source: &Path, destination: &Path) {
+        std::fs::create_dir_all(destination).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let src = entry.path();
+            let dst = destination.join(entry.file_name());
+            if src.is_dir() {
+                copy_tree(&src, &dst);
+            } else {
+                std::fs::copy(src, dst).unwrap();
+            }
+        }
+    }
+    fn assert_tree_equal(expected: &Path, actual: &Path) {
+        for entry in std::fs::read_dir(expected).unwrap() {
+            let entry = entry.unwrap();
+            let expected_path = entry.path();
+            let actual_path = actual.join(entry.file_name());
+            if expected_path.is_dir() {
+                assert!(
+                    actual_path.is_dir(),
+                    "missing directory {}",
+                    actual_path.display()
+                );
+                assert_tree_equal(&expected_path, &actual_path);
+            } else {
+                assert_eq!(
+                    std::fs::read(&expected_path).unwrap(),
+                    std::fs::read(&actual_path).unwrap(),
+                    "restored file differs: {}",
+                    actual_path.display()
+                );
+            }
+        }
+    }
+    let backup_world = backup_dir.join("world");
+    copy_tree(&world_dir, &backup_world);
+    copy_tree(&backup_world, &restored_world_dir);
+    assert_tree_equal(&world_dir, &restored_world_dir);
 
     // 4. Boot RadServer #3 on restored_world_dir and verify complete integrity!
     let restored_port = free_port();
@@ -1753,7 +1767,7 @@ async fn headless_whitelist_ops_console_and_restart_e2e() {
 
 #[tokio::test]
 #[ignore = "requires staged versions/26.3 data package"]
-async fn headless_version_package_validation_cross_dir_and_upgrade() {
+async fn headless_version_package_validation_cross_dir_and_selection() {
     use rad_core::PROTOCOL_VERSION;
     use rad_core::crypto::offline_player_uuid;
     use rad_core::packet::Packet;
@@ -1858,28 +1872,17 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
         "rad-server must refuse to start when selected version package is missing"
     );
 
-    // 3. Upgrade via generate_version_package.ps1 -BackupExisting preserves user files and version.toml
+    // 3. Preserve the user's version selection while validating the installed package.
     let preserved_toml = "# user-preserved\nversion = \"26.3\"\n";
     std::fs::write(&version_toml_path, preserved_toml).unwrap();
-    let gen_script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("scripts/generate_version_package.ps1");
-    let gen_status = Command::new("powershell")
-        .args([
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            gen_script.to_str().unwrap(),
-            "-Profile",
-            "debug",
-            "-OutDir",
-            install_dir.join("versions/26.3").to_str().unwrap(),
-            "-BackupExisting",
-        ])
-        .status()
-        .unwrap();
-    assert!(gen_status.success(), "generate_version_package.ps1 failed");
+    let selected_package = rad_core::version_package::LoadedVersionPackage::load_from_versions_dir(
+        &install_dir.join("versions"),
+        rad_core::MINECRAFT_VERSION,
+    )
+    .expect("preserved version selection still loads its package");
+    selected_package
+        .verify_and_resolve_library_path()
+        .expect("preserved package library remains valid");
     assert_eq!(
         std::fs::read_to_string(install_dir.join("rad.properties")).unwrap(),
         props
@@ -1887,12 +1890,6 @@ async fn headless_version_package_validation_cross_dir_and_upgrade() {
     assert_eq!(
         std::fs::read_to_string(&version_toml_path).unwrap(),
         preserved_toml
-    );
-    assert!(
-        std::fs::read_dir(install_dir.join("versions"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|e| e.file_name().to_string_lossy().starts_with("26.3.bak."))
     );
 
     // 4. Launch from a DIFFERENT working directory (--config <install_dir>/rad.properties)

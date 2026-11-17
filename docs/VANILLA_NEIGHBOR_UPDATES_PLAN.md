@@ -96,7 +96,7 @@ fully vanilla. Prior to working, inspect current code and tests.
   loads, filled queue, memory limits, TPS, and deadlock prevention.
 - Comparative tests with vanilla 26.3 and a real client when available;
   headless/unit tests must be noted separately and not passed off as GUI verification.
-- `scripts/verify.ps1`, release DLL, isolated packaging, and state verification
+- ``cargo test --workspace --locked``, release DLL, isolated packaging, and state verification
   before and after restart. Note that the script may update dist and stop the
   server; preserve data, avoid forceful termination, leave server startup to the user.
 

@@ -32,9 +32,9 @@ RadServer/
 
 ## Stage 0. Audit and Baseline
 
-1. Read applicable AGENTS.md, inspect current checkout state, active processes, and results of `scripts/verify.ps1`; do not overwrite others' changes.
+1. Read applicable AGENTS.md, inspect current checkout state, active processes, and results of ``cargo test --workspace --locked``; do not overwrite others' changes.
 2. Find all usages of `mc777_data`, `PROTOCOL_VERSION`, packet IDs, registries, tags, NBT, feature flags, and hardcoded 26.3 values across all five crates. Separately identify runtime and compile-time dependencies.
-3. Audit `RadCore/data/mc777/{blocks,items,entities,menus}.json`, `PROVENANCE.json`, `scripts/generate_mc777_data.ps1`, associated generators, and actual table usage. Do not treat them as an exhaustive package set.
+3. Audit `RadCore/data/mc777/{blocks,items,entities,menus}.json`, `PROVENANCE.json`, `the removed data-generation script`, associated generators, and actual table usage. Do not treat them as an exhaustive package set.
 4. Verify execution paths directly, via `dist`, and tests with a temporary working directory. Determine actual dependencies of RadProxy and RadLimbo.
 5. Record baseline functional, protocol, and persistence tests.
 
@@ -82,12 +82,12 @@ RadServer/
 
 ## Stage 5. Packaging, Updating, and Testing
 
-1. Update `scripts/package.ps1`, `Build.ps1`, launcher, smoke tests, and documentation so that release builds and places all necessary data into `dist/RadServer/versions/26.3/`. For other OSes, create equivalent verified instructions or scripts.
+1. Update ``cargo build --workspace --release --locked``, `Cargo workspace build`, launcher, smoke tests, and documentation so that release builds and places all necessary data into `dist/RadServer/versions/26.3/`. For other OSes, create equivalent verified instructions or scripts.
 2. Update version package via staging, validation, and atomic move; do not leave a half-updated installation. Do not overwrite working data, config, list files, addons, or secrets. Create backups before migration.
 3. Tests: generator, schema, hashes, missing/extraneous/corrupted files, path traversal, wrong version/protocol, oversized input, launch from a different directory, compatibility with old installation and config.
 4. Integration tests in temporary `dist`: startup, status, login, configuration, play, blocks/inventory, and restart/persistence. Separately test proxy and limbo if they use version data.
 5. Verify execution with real 26.3 client if available and if it does not disrupt user workflow; explicitly indicate absence of verification.
-6. Execute `scripts/verify.ps1`, release build, and smoke. Gracefully stop working server with persistence only when updating `dist` is necessary, without forced termination; leave launch to user after build.
+6. Execute ``cargo test --workspace --locked``, release build, and smoke. Gracefully stop working server with persistence only when updating `dist` is necessary, without forced termination; leave launch to user after build.
 
 **Done:** Clean install and upgrade pass checks, user data is preserved, list of actually supported platforms and versions is accurate.
 

@@ -74,7 +74,7 @@ In separate families, verify placement/orientation/shape for stairs, slabs, fenc
 
 1. Maintain a family-by-family matrix: registry, placement, interaction, power/ticks, networking, persistence, vanilla fixtures, real client.
 2. Tests: screenshot recreation, straight/corner/diagonal connections, multiple sources, 0..15 signal, lamp, repeaters, chunk boundaries, restart, load testing, two players, security, and malformed packets.
-3. Run `scripts/verify.ps1` after reviewing its side effects, followed by release build and isolated smoke test; test with a real 26.3 client where feasible.
+3. Run ``cargo test --workspace --locked`` after reviewing its side effects, followed by release build and isolated smoke test; test with a real 26.3 client where feasible.
 4. Assemble synchronized executable/DLL/data in `dist`; do not overwrite user data, shut down the server cleanly, and leave it stopped.
 5. Honestly enumerate implemented and unsupported mechanics; do not claim full vanilla parity based solely on registries or unit tests.
 

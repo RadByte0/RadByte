@@ -21,7 +21,7 @@ Date: November 15, 2026. This is a technical investigation, not a legal assessme
 - [ ] Separate facts, assumptions, and questions regarding the rights to acquire, transform, use, and distribute each group.
 - [ ] Do not include these specific materials and their derivatives in the publication candidate until legal grounds are established; do not delete local originals.
 - [ ] Review available licensed sources/permissions or document an independent replacement; automated local acquisition is not proof of permissibility.
-- [ ] Verify downstream: `scripts/generate_mc777_data.ps1`, `scripts/generate_version_package.ps1`, version packages, statically compiled binaries, fixtures, and staging; separately verify source and binary for actual content.
+- [ ] Verify downstream: `the removed data-generation script`, ``rad-tools package-version``, version packages, statically compiled binaries, fixtures, and staging; separately verify source and binary for actual content.
 - [ ] For replacements, verify correct 26.3 IDs/states/tags, network handshake, save compatibility, and real client operation; in the absence of data — fail-closed, not synthetic production.
 
 ### P1. Authorship and Chosen License

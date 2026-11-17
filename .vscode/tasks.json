@@ -2,15 +2,10 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "RadByte: Build & Update dist/",
+      "label": "RadByte: Build workspace",
       "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/package.ps1"
-      ],
+      "command": "cargo",
+      "args": ["build", "--workspace", "--release", "--locked"],
       "group": {
         "kind": "build",
         "isDefault": true
@@ -18,15 +13,10 @@
       "problemMatcher": "$rustc"
     },
     {
-      "label": "RadByte: Verify & Update dist/",
+      "label": "RadByte: Test workspace",
       "type": "shell",
-      "command": "powershell",
-      "args": [
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}/scripts/verify.ps1"
-      ],
+      "command": "cargo",
+      "args": ["test", "--workspace", "--locked"],
       "group": "test",
       "problemMatcher": "$rustc"
     }

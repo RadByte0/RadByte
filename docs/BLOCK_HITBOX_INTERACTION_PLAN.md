@@ -62,7 +62,7 @@ Eliminate player snagging/stuck states, false movement rollbacks/rubber-banding,
 - Save/restart of world and player; atomicity, entity/item persistence, testing legacy worlds only on copies, backup/restore.
 - Performance tests for high-volume state lookups and long-run TPS, parser limits, fuzz/property testing as needed, and deadlock freedom.
 - Real 26.3 client and, where feasible, comparison with vanilla; if GUI or reference source is unavailable, mark as `not verified` and proceed with independent tasks.
-- Update the report with numerators/denominators and methodology, run `scripts/verify.ps1` after reviewing side effects, and assemble synchronized executable/version DLL/data package in `dist`. Cleanly save and stop the production server only when necessary; leave launching to the user.
+- Update the report with numerators/denominators and methodology, run ``cargo test --workspace --locked`` after reviewing side effects, and assemble synchronized executable/version DLL/data package in `dist`. Cleanly save and stop the production server only when necessary; leave launching to the user.
 
 ## Execution Order
 

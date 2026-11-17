@@ -73,7 +73,7 @@ animation and interaction; inspect the current code before starting work.
   tests on entity counts, malformed packets, queues, races, and write interruptions.
 - Comparative scenarios against vanilla and a real 26.3 client, not just headless;
   separately record anything that could not be verified.
-- Check `scripts/verify.ps1` for side effects, run the entire test suite,
+- Check ``cargo test --workspace --locked`` for side effects, run the entire test suite,
   produce a release build, and run isolated smoke testing with the version DLL and package data.
 - Before updating a running server, save and shut down cleanly without force;
   preserve settings/worlds and leave server launch to the user.
