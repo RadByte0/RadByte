@@ -6,7 +6,6 @@
 #[cfg(windows)]
 mod gui_windows;
 mod version_download;
-#[cfg(windows)]
 mod version_install;
 mod version_selection;
 
