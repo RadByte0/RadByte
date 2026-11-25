@@ -434,10 +434,10 @@ pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
             .current_dir(&work)
             .arg("-DbundlerMainClass=net.minecraft.data.Main")
             .arg("-jar")
-            .arg(&jar_path)
+            .arg("server.jar")
             .arg("--reports")
             .arg("--output")
-            .arg(&reports_out)
+            .arg("gen")
             .status()
             .map_err(|e| format!("Failed to launch Java data generator: {e}"))?;
         if !status.success() {
