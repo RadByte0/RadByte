@@ -24,6 +24,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
+fastnbt.workspace = true
 
 [[bench]]
 name = "protocol_bench"

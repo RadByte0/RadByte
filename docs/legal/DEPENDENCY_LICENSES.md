@@ -6,18 +6,18 @@
 - `Cargo.toml` declares `license = "MIT OR Apache-2.0"`.
 - Root `LICENSE` / `LICENSE-MIT` / `LICENSE-APACHE` files have not been added yet because the copyright holder name and final licensing decision must be confirmed by the project owner.
 
-## 2. Third-Party Cargo Dependency Licenses (`Cargo.lock`, 247 external crates)
+## 2. Third-Party Cargo Dependency Licenses (`Cargo.lock`, 252 external crates)
 Observed via `cargo metadata --format-version 1 --locked` (filtering packages where `source` is non-null):
 
 | License Expression | Crate Count |
 | --- | ---: |
-| `MIT OR Apache-2.0` | 127 |
+| `MIT OR Apache-2.0` | 131 |
 | `Apache-2.0 OR MIT` | 21 |
 | `MIT` | 40 |
 | `Unicode-3.0` | 18 |
 | `MIT/Apache-2.0` | 12 |
 | `Apache-2.0` | 4 |
-| `Unlicense OR MIT` | 3 |
+| `Unlicense OR MIT` | 4 |
 | `ISC` | 3 |
 | `Zlib` | 2 |
 | `Apache-2.0 OR ISC OR MIT` | 2 |
@@ -32,6 +32,9 @@ Observed via `cargo metadata --format-version 1 --locked` (filtering packages wh
 | `Zlib OR Apache-2.0 OR MIT` | 1 |
 | `(MIT OR Apache-2.0) AND Unicode-3.0` | 1 |
 | `CDLA-Permissive-2.0` | 1 |
+| `Apache-2.0/MIT` | 1 |
+
+`fastnbt 2.6.3` is a development-only dependency of `rad-core`. Its serializer and deserializer are used as an independent compatibility reference in the network NBT tests; no FastNBT implementation code is copied into RadByte's runtime. The crate metadata declares `MIT OR Apache-2.0`. The tested source revision is recorded with its notices in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## 3. Automated Provenance Scan
 

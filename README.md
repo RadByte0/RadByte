@@ -30,17 +30,21 @@ RadByte is an independent project. It is **not an official Minecraft product** a
 
 ### RadServer
 
-RadServer also needs a **compatible version data package**, which is not included in the release. You must supply `blocks.json`, `items.json`, `entities.json`, and `menus.json` yourself; `tags.json` is optional. The data must match the supported version and its provenance and rights should be appropriate for your use. The executable and library alone are not a complete installation.
+RadServer needs a **compatible version data package** (`blocks.json`, `items.json`, `entities.json`, `menus.json`; `tags.json` is optional), which is not bundled in the repository or GitHub release. You can set it up in three ways:
 
-On **Windows**, open `rad-server-…exe`. If no usable package is installed, the version setup screen lets you choose 26.3 and a local data folder. It downloads the matching version library from the same release and verifies its SHA-256 against GitHub's release metadata. The dashboard opens after setup.
+1. **Automatic setup (EULA):**
+   - **Windows GUI:** Open `rad-server-…exe`, click **`Auto install (EULA)`**, and confirm the [Minecraft EULA](https://aka.ms/MinecraftEULA).
+   - **Terminal / Docker (`--nogui`):** Run `rad-server --nogui`. When prompted in an interactive terminal, type `yes` to agree to the Minecraft EULA (or pass `--accept-eula`, set `EULA=TRUE`, or set `eula=true` in `eula.txt`).
+   - RadServer downloads the matching `rad-version-26.3-…` native library from GitHub Releases (verified via SHA-256) and the official Minecraft 26.3 `server.jar` from Mojang (verified via SHA-1), runs `--reports` (automatically fetching a temporary portable Adoptium JRE if `java` is not installed), converts the four tables locally, and deletes the temporary files before starting.
+2. **`import/` drop-in folder:** Place your locally supplied `blocks.json`, `items.json`, `entities.json`, and `menus.json` into `import/` next to `rad-server` before starting `--nogui`; RadServer will install `versions/26.3/` automatically on startup.
+3. **Manual folder picker / CLI:** On Windows GUI, browse to a folder containing the four JSON files and click **`Install version`**, or use `rad-tools package-version` below.
 
-For terminal mode on Windows, pass `--nogui`:
+### Pelican / Pterodactyl Eggs
 
-```text
-rad-server-x86_64-pc-windows-msvc.exe --nogui
-```
-
-On **Linux and macOS**, RadServer runs in the terminal. Download the matching `rad-version-26.3-…` library as well; Linux uses `.so` and macOS uses `.dylib`. Make the executable runnable with `chmod +x <server-file>`. Prepare the package with the Rust tool below, then start the server from the same working directory.
+Ready-to-import panel eggs are provided in [`deploy/`](deploy/):
+- [`deploy/egg-radbyte.json`](deploy/egg-radbyte.json) — `RadServer` (auto-installs via `EULA=true` and portable Java if needed)
+- [`deploy/egg-radproxy.json`](deploy/egg-radproxy.json) — `RadProxy`
+- [`deploy/egg-radlimbo.json`](deploy/egg-radlimbo.json) — `RadLimbo`
 
 ### Prepare a version package manually
 

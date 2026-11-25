@@ -70,7 +70,16 @@ fn main() {
     print_startup_banner("RadServer", env!("CARGO_PKG_VERSION"), SERVER_BANNER);
 
     let cfg_path = resolve_config_path("rad.properties");
+    let work_dir = cfg_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let versions_dir = resolve_versions_dir(&cfg_path);
+
+    if let Err(e) = version_install::ensure_installed_headless(work_dir, &versions_dir) {
+        error!(error = %e, "version setup required before starting RadServer");
+        std::process::exit(1);
+    }
 
     let selected_version = match version_selection::load(&versions_dir) {
         Ok(version) => version,

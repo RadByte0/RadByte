@@ -14,6 +14,7 @@ struct State {
     path: H,
     status: H,
     install: H,
+    auto_install: H,
     browse: H,
     font: H,
     title_font: H,
@@ -64,6 +65,7 @@ unsafe extern "system" {
 unsafe extern "system" {
     fn PostMessageW(h: H, msg: u32, w: usize, l: isize) -> i32;
     fn EnableWindow(h: H, enable: i32) -> i32;
+    fn MessageBoxW(owner: H, text: *const u16, caption: *const u16, flags: u32) -> i32;
 }
 
 fn matches_version(query: &str) -> bool {
@@ -108,10 +110,11 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
             s.path = ctrl(h, "EDIT", "", 0x00800000 | 0x0080, 203, inst);
             s.browse = ctrl(h, "BUTTON", "Browse", 0x0000000b, 204, inst);
             s.install = ctrl(h, "BUTTON", "Install version", 0x0000000b, 205, inst);
+            s.auto_install = ctrl(h, "BUTTON", "Auto install (EULA)", 0x0000000b, 206, inst);
             s.status = ctrl(
                 h,
                 "STATIC",
-                "Select the folder containing your version data.",
+                "Select a local data folder, or click Auto install (EULA).",
                 0,
                 0,
                 inst,
@@ -126,6 +129,7 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 (s.path, 40, 297, 386, 30),
                 (s.browse, 436, 297, 92, 30),
                 (s.status, 40, 344, 488, 45),
+                (s.auto_install, 40, 405, 190, 38),
                 (s.install, 348, 405, 180, 38),
             ] {
                 unsafe {
@@ -251,10 +255,12 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 let mut s = STATE.get().unwrap().lock().unwrap();
                 s.busy = true;
                 let versions = s.versions.clone();
-                let (install, browse, status) = (s.install, s.browse, s.status);
+                let (install, auto_install, browse, status) =
+                    (s.install, s.auto_install, s.browse, s.status);
                 drop(s);
                 unsafe {
                     EnableWindow(install, 0);
+                    EnableWindow(auto_install, 0);
                     EnableWindow(browse, 0);
                     SetWindowTextW(
                         status,
@@ -271,12 +277,79 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                         PostMessageW(h, 0x8001, 0, 0);
                     }
                 });
+            } else if id == 206 {
+                let s = STATE.get().unwrap().lock().unwrap();
+                if s.busy {
+                    return 0;
+                }
+                let (list, status) = (s.list, s.status);
+                drop(s);
+                if unsafe { SendMessageW(list, 0x0188, 0, 0) } < 0 {
+                    unsafe {
+                        SetWindowTextW(status, wide("Select version 26.3 first.").as_ptr());
+                    }
+                    return 0;
+                }
+                let agreed = unsafe {
+                    MessageBoxW(
+                        h,
+                        wide("RadServer can automatically download the official Minecraft 26.3 server.jar (and temporary portable Java if needed) to generate the 4 registry files locally.\n\nDo you agree to the Minecraft EULA?\nhttps://aka.ms/MinecraftEULA").as_ptr(),
+                        wide("Minecraft EULA").as_ptr(),
+                        0x04 | 0x20,
+                    )
+                };
+                if agreed != 6 {
+                    unsafe {
+                        SetWindowTextW(
+                            status,
+                            wide("Minecraft EULA must be accepted for automatic installation.")
+                                .as_ptr(),
+                        );
+                    }
+                    return 0;
+                }
+                let mut s = STATE.get().unwrap().lock().unwrap();
+                s.busy = true;
+                let versions = s.versions.clone();
+                let (install, auto_install, browse, status) =
+                    (s.install, s.auto_install, s.browse, s.status);
+                drop(s);
+                if let Some(work_dir) = versions.parent() {
+                    let _ = std::fs::write(
+                        work_dir.join("eula.txt"),
+                        "# By changing the setting below to TRUE you are indicating your agreement to Mojang's EULA (https://aka.ms/MinecraftEULA).\neula=true\n",
+                    );
+                }
+                unsafe {
+                    EnableWindow(install, 0);
+                    EnableWindow(auto_install, 0);
+                    EnableWindow(browse, 0);
+                    SetWindowTextW(
+                        status,
+                        wide("Auto-installing... Fetching Java, Mojang server.jar, and RadByte library.").as_ptr(),
+                    );
+                }
+                std::thread::spawn(move || {
+                    let result = crate::version_install::install_from_mojang(&versions);
+                    let mut state = STATE.get().unwrap().lock().unwrap();
+                    state.error = result.err().unwrap_or_default();
+                    state.busy = false;
+                    unsafe {
+                        PostMessageW(h, 0x8001, 0, 0);
+                    }
+                });
             }
             0
         }
         0x8001 => {
             let s = STATE.get().unwrap().lock().unwrap();
-            let (error, status, install, browse) = (s.error.clone(), s.status, s.install, s.browse);
+            let (error, status, install, auto_install, browse) = (
+                s.error.clone(),
+                s.status,
+                s.install,
+                s.auto_install,
+                s.browse,
+            );
             drop(s);
             if error.is_empty() {
                 RESULT.store(1, Ordering::Relaxed);
@@ -287,6 +360,7 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 unsafe {
                     SetWindowTextW(status, wide(&error).as_ptr());
                     EnableWindow(install, 1);
+                    EnableWindow(auto_install, 1);
                     EnableWindow(browse, 1);
                 }
             }
@@ -335,7 +409,7 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
             }
             0
         }
-        0x002b if (204..=205).contains(&w) && l != 0 => {
+        0x002b if (204..=206).contains(&w) && l != 0 => {
             let item = unsafe { &mut *(l as *mut DrawItem) };
             let s = STATE.get().unwrap().lock().unwrap();
             unsafe {
@@ -364,7 +438,7 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 let old_font = SelectObject(item.dc, s.font);
                 SetTextColor(
                     item.dc,
-                    if s.busy && w == 205 {
+                    if s.busy && (w == 205 || w == 206) {
                         0x00888888
                     } else {
                         0x00ffffff
@@ -373,10 +447,10 @@ unsafe extern "system" fn proc(h: H, msg: u32, w: usize, l: isize) -> isize {
                 SetBkMode(item.dc, 1);
                 DrawTextW(
                     item.dc,
-                    wide(if w == 205 {
-                        "Install version"
-                    } else {
-                        "Browse"
+                    wide(match w {
+                        205 => "Install version",
+                        206 => "Auto install (EULA)",
+                        _ => "Browse",
                     })
                     .as_ptr(),
                     -1,
@@ -462,6 +536,7 @@ pub fn choose(versions: &Path) -> Result<bool, String> {
                 path: 0,
                 status: 0,
                 install: 0,
+                auto_install: 0,
                 browse: 0,
                 font,
                 title_font,

@@ -307,7 +307,10 @@ fn encode_payload(tag: &NbtTag, buf: &mut impl BufMut, depth: usize) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use bytes::BytesMut;
+    use fastnbt::{ByteArray, DeOpts, IntArray, LongArray, SerOpts, Value as FastNbtValue};
 
     use super::*;
 
@@ -329,5 +332,71 @@ mod tests {
         encode_network_nbt(&tag, &mut buf).unwrap();
         let decoded = decode_network_nbt(&mut buf).unwrap();
         assert_eq!(decoded, tag);
+    }
+
+    #[test]
+    fn network_nbt_is_compatible_with_fastnbt() {
+        let mut external_compound = HashMap::new();
+        external_compound.insert("byte".into(), FastNbtValue::Byte(-7));
+        external_compound.insert("short".into(), FastNbtValue::Short(32000));
+        external_compound.insert("int".into(), FastNbtValue::Int(777));
+        external_compound.insert("long".into(), FastNbtValue::Long(1_i64 << 40));
+        external_compound.insert("float".into(), FastNbtValue::Float(1.25));
+        external_compound.insert("double".into(), FastNbtValue::Double(-2.5));
+        external_compound.insert(
+            "byte_array".into(),
+            FastNbtValue::ByteArray(ByteArray::new(vec![-1, 0, 1])),
+        );
+        external_compound.insert("string".into(), FastNbtValue::String("RadByte".into()));
+        external_compound.insert(
+            "list".into(),
+            FastNbtValue::List(vec![FastNbtValue::Int(1), FastNbtValue::Int(2)]),
+        );
+        external_compound.insert(
+            "int_array".into(),
+            FastNbtValue::IntArray(IntArray::new(vec![-1, 0, 1])),
+        );
+        external_compound.insert(
+            "long_array".into(),
+            FastNbtValue::LongArray(LongArray::new(vec![-1, 0, 1])),
+        );
+        let external = FastNbtValue::Compound(external_compound);
+
+        let fastnbt_wire = fastnbt::to_bytes_with_opts(&external, SerOpts::network_nbt()).unwrap();
+        let mut fastnbt_input = BytesMut::from(fastnbt_wire.as_slice());
+        let decoded_by_radbyte = decode_network_nbt(&mut fastnbt_input).unwrap();
+        assert!(fastnbt_input.is_empty());
+        assert_eq!(decoded_by_radbyte, to_radbyte_value(external.clone()));
+
+        let mut radbyte_wire = BytesMut::new();
+        encode_network_nbt(&decoded_by_radbyte, &mut radbyte_wire).unwrap();
+        let decoded_by_fastnbt: FastNbtValue =
+            fastnbt::from_bytes_with_opts(&radbyte_wire, DeOpts::network_nbt().max_seq_len(1024))
+                .unwrap();
+        assert_eq!(decoded_by_fastnbt, external);
+    }
+
+    fn to_radbyte_value(value: FastNbtValue) -> NbtTag {
+        match value {
+            FastNbtValue::Byte(value) => NbtTag::Byte(value),
+            FastNbtValue::Short(value) => NbtTag::Short(value),
+            FastNbtValue::Int(value) => NbtTag::Int(value),
+            FastNbtValue::Long(value) => NbtTag::Long(value),
+            FastNbtValue::Float(value) => NbtTag::Float(value),
+            FastNbtValue::Double(value) => NbtTag::Double(value),
+            FastNbtValue::String(value) => NbtTag::String(value),
+            FastNbtValue::ByteArray(value) => NbtTag::ByteArray(value.into_inner()),
+            FastNbtValue::IntArray(value) => NbtTag::IntArray(value.into_inner()),
+            FastNbtValue::LongArray(value) => NbtTag::LongArray(value.into_inner()),
+            FastNbtValue::List(values) => {
+                NbtTag::List(values.into_iter().map(to_radbyte_value).collect())
+            }
+            FastNbtValue::Compound(values) => NbtTag::Compound(
+                values
+                    .into_iter()
+                    .map(|(name, value)| (name, to_radbyte_value(value)))
+                    .collect(),
+            ),
+        }
     }
 }

@@ -1,39 +1,65 @@
-//! Install the supported version using locally supplied data and a release library.
+//! Install the supported version using locally supplied data or Mojang's official data generator.
 use rad_core::version_package::{
     LoadedVersionPackage, VersionLibraryMeta, VersionManifest, VersionPackageFile,
 };
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
-use std::{io::Read, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, IsTerminal, Read, Write},
+    path::Path,
+    process::Command,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-#[repr(C)]
-#[derive(Default)]
-struct SystemTime {
-    year: u16,
-    month: u16,
-    weekday: u16,
-    day: u16,
-    hour: u16,
-    minute: u16,
-    second: u16,
-    millisecond: u16,
-}
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetSystemTime(time: *mut SystemTime);
-}
+const MINECRAFT_EULA_URL: &str = "https://aka.ms/MinecraftEULA";
+const MOJANG_MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
 fn utc_now() -> String {
-    let mut time = SystemTime::default();
-    unsafe {
-        GetSystemTime(&mut time);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let hour = rem / 3_600;
+    let minute = (rem % 3_600) / 60;
+    let second = rem % 60;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn release_target() -> Result<(&'static str, &'static str), String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok(("x86_64-pc-windows-msvc", "dll")),
+        ("windows", "aarch64") => Ok(("aarch64-pc-windows-msvc", "dll")),
+        ("linux", "x86_64") => Ok(("x86_64-unknown-linux-gnu", "so")),
+        ("linux", "aarch64") => Ok(("aarch64-unknown-linux-gnu", "so")),
+        ("macos", "x86_64") => Ok(("x86_64-apple-darwin", "dylib")),
+        ("macos", "aarch64") => Ok(("aarch64-apple-darwin", "dylib")),
+        (os, arch) => Err(format!("Unsupported platform: {os}/{arch}")),
     }
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        time.year, time.month, time.day, time.hour, time.minute, time.second
-    )
 }
 
 pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
+    install_with_source(
+        versions,
+        data,
+        "local user-supplied data; provenance not verified",
+    )
+}
+
+fn install_with_source(versions: &Path, data: &Path, source_label: &str) -> Result<(), String> {
     let selection = versions.join("version.toml");
     if selection.exists() {
         let selected = crate::version_selection::load(versions)?;
@@ -60,13 +86,9 @@ pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
     {
         return Err("Invalid release repository".into());
     }
-    let target = match std::env::consts::ARCH {
-        "x86_64" => "x86_64-pc-windows-msvc",
-        "aarch64" => "aarch64-pc-windows-msvc",
-        _ => return Err("Unsupported architecture".into()),
-    };
-    let preferred_name = format!("rad-version-26.3-{target}.dll");
-    let legacy_name = format!("rad_version_26_3-{target}.dll");
+    let (target, ext) = release_target()?;
+    let preferred_name = format!("rad-version-26.3-{target}.{ext}");
+    let legacy_name = format!("rad_version_26_3-{target}.{ext}");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
         .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
@@ -185,13 +207,13 @@ pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
             protocol_version: 777,
             package_format_version: 1,
             world_data_version: 4790,
-            source: "local user-supplied data; provenance not verified".into(),
+            source: source_label.into(),
             generated_utc: utc_now(),
             notes: None,
             library: Some(VersionLibraryMeta {
                 path: name,
                 abi_version: 1,
-                target_os: "windows".into(),
+                target_os: std::env::consts::OS.into(),
                 target_arch: std::env::consts::ARCH.into(),
                 size_bytes: library.len() as u64,
                 sha256: hash,
@@ -246,9 +268,505 @@ pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
     result
 }
 
+/// Ensures version `26.3` is installed in headless mode (via `import/` or Mojang `--reports` after EULA).
+pub fn ensure_installed_headless(work_dir: &Path, versions_dir: &Path) -> Result<(), String> {
+    if versions_dir.join("26.3").join("version.json").is_file() {
+        return Ok(());
+    }
+
+    let import_dir = work_dir.join("import");
+    let has_import_data = ["items.json", "blocks.json", "entities.json", "menus.json"]
+        .iter()
+        .all(|name| import_dir.join(name).is_file());
+    if has_import_data {
+        tracing::info!(dir = %import_dir.display(), "found version data in import/; installing version 26.3");
+        return install(versions_dir, &import_dir);
+    }
+
+    let _ = std::fs::create_dir_all(&import_dir);
+    ensure_eula_accepted(work_dir, &import_dir)?;
+    install_from_mojang(versions_dir)
+}
+
+fn is_eula_file_accepted(eula_path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(eula_path) else {
+        return false;
+    };
+    raw.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.starts_with('#')
+            && trimmed.split_once('=').is_some_and(|(k, v)| {
+                k.trim().eq_ignore_ascii_case("eula") && v.trim().eq_ignore_ascii_case("true")
+            })
+    })
+}
+
+fn write_eula_file(eula_path: &Path, accepted: bool) -> Result<(), String> {
+    let content = format!(
+        "# By changing the setting below to TRUE you are indicating your agreement to Mojang's EULA ({MINECRAFT_EULA_URL}).\neula={}\n",
+        if accepted { "true" } else { "false" }
+    );
+    std::fs::write(eula_path, content)
+        .map_err(|e| format!("failed to write {}: {e}", eula_path.display()))
+}
+
+fn ensure_eula_accepted(work_dir: &Path, import_dir: &Path) -> Result<(), String> {
+    if std::env::args().skip(1).any(|a| a == "--accept-eula") {
+        return Ok(());
+    }
+    for var in ["EULA", "RADBYTE_EULA"] {
+        if let Ok(val) = std::env::var(var)
+            && matches!(
+                val.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes"
+            )
+        {
+            return Ok(());
+        }
+    }
+    let eula_path = work_dir.join("eula.txt");
+    if is_eula_file_accepted(&eula_path) {
+        return Ok(());
+    }
+
+    if std::io::stdin().is_terminal() {
+        println!();
+        println!("RadServer version 26.3 is not installed yet.");
+        println!(
+            "To automatically download the official Minecraft 26.3 server.jar and generate registry data,"
+        );
+        println!("you must agree to the Minecraft EULA: {MINECRAFT_EULA_URL}");
+        print!("Do you agree to the Minecraft EULA? [yes/no]: ");
+        let _ = std::io::stdout().flush();
+
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line).is_ok()
+            && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        {
+            write_eula_file(&eula_path, true)?;
+            return Ok(());
+        }
+    }
+
+    if !eula_path.exists() {
+        let _ = write_eula_file(&eula_path, false);
+    }
+    Err(format!(
+        "Minecraft 26.3 is not installed. Either:\n  1) Agree to {MINECRAFT_EULA_URL} by setting eula=true in {} (or EULA=TRUE in panel variables) to auto-install, or\n  2) Place blocks.json, items.json, entities.json, and menus.json into {}",
+        eula_path.display(),
+        import_dir.display()
+    ))
+}
+
+/// Downloads official Minecraft `server.jar`, runs `--reports`, converts outputs, and installs `26.3`.
+pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!("fetching Mojang version manifest for Minecraft 26.3");
+    let manifest: serde_json::Value = client
+        .get(MOJANG_MANIFEST_URL)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Cannot fetch Mojang version manifest: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let version_url = manifest["versions"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|v| v["id"] == "26.3"))
+        .and_then(|v| v["url"].as_str())
+        .ok_or("Minecraft 26.3 was not found in Mojang's version manifest.")?;
+
+    let version_meta: serde_json::Value = client
+        .get(version_url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Cannot fetch Minecraft 26.3 metadata: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let server_url = version_meta["downloads"]["server"]["url"]
+        .as_str()
+        .ok_or("Mojang metadata for 26.3 is missing downloads.server.url")?;
+    let expected_sha1 = version_meta["downloads"]["server"]["sha1"]
+        .as_str()
+        .ok_or("Mojang metadata for 26.3 is missing downloads.server.sha1")?;
+
+    std::fs::create_dir_all(versions).map_err(|e| e.to_string())?;
+    let work = versions.join(format!(".rad-mojang-{}", std::process::id()));
+    std::fs::create_dir(&work).map_err(|e| format!("Cannot create temporary dir: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        let java_bin = resolve_or_fetch_portable_java(&client, &work)?;
+
+        tracing::info!("downloading official Minecraft 26.3 server.jar");
+        let resp = client
+            .get(server_url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| format!("Cannot download Minecraft server.jar: {e}"))?;
+        let mut jar_bytes = Vec::new();
+        resp.take(256 * 1024 * 1024 + 1)
+            .read_to_end(&mut jar_bytes)
+            .map_err(|e| e.to_string())?;
+
+        let actual_sha1 = format!("{:x}", Sha1::digest(&jar_bytes));
+        if jar_bytes.is_empty()
+            || jar_bytes.len() > 256 * 1024 * 1024
+            || actual_sha1 != expected_sha1
+        {
+            return Err(format!(
+                "Downloaded server.jar failed SHA-1 verification (expected {expected_sha1}, got {actual_sha1})"
+            ));
+        }
+
+        let jar_path = work.join("server.jar");
+        std::fs::write(&jar_path, &jar_bytes).map_err(|e| e.to_string())?;
+        drop(jar_bytes);
+
+        let reports_out = work.join("gen");
+        tracing::info!("running Mojang data generator (--reports) to build local registry tables");
+        let status = Command::new(&java_bin)
+            .current_dir(&work)
+            .arg("-DbundlerMainClass=net.minecraft.data.Main")
+            .arg("-jar")
+            .arg(&jar_path)
+            .arg("--reports")
+            .arg("--output")
+            .arg(&reports_out)
+            .status()
+            .map_err(|e| format!("Failed to launch Java data generator: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "Minecraft data generator exited with status {status}"
+            ));
+        }
+
+        let data_dir = work.join("data");
+        convert_mojang_reports(&reports_out.join("reports"), &data_dir)?;
+        install_with_source(
+            versions,
+            &data_dir,
+            "generated locally via Mojang server.jar --reports after EULA acceptance",
+        )
+    })();
+
+    if work.exists() {
+        let _ = std::fs::remove_dir_all(&work);
+    }
+    result
+}
+
+fn adoptium_os_arch() -> Result<(&'static str, &'static str), String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok(("windows", "x64")),
+        ("windows", "aarch64") => Ok(("windows", "aarch64")),
+        ("linux", "x86_64") => Ok(("linux", "x64")),
+        ("linux", "aarch64") => Ok(("linux", "aarch64")),
+        ("macos", "x86_64") => Ok(("mac", "x64")),
+        ("macos", "aarch64") => Ok(("mac", "aarch64")),
+        (os, arch) => Err(format!("Portable JRE unsupported on {os}/{arch}")),
+    }
+}
+
+fn find_java_in_dir(dir: &Path) -> Option<std::path::PathBuf> {
+    let exe = if cfg!(windows) { "java.exe" } else { "java" };
+    for rel in [
+        Path::new("bin").join(exe),
+        Path::new("Contents").join("Home").join("bin").join(exe),
+    ] {
+        let p = dir.join(&rel);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let sub = entry.path();
+        if sub.is_dir() {
+            for rel in [
+                Path::new("bin").join(exe),
+                Path::new("Contents").join("Home").join("bin").join(exe),
+            ] {
+                let p = sub.join(&rel);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_or_fetch_portable_java(
+    client: &reqwest::blocking::Client,
+    work: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let sys_ok = Command::new("java")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if sys_ok {
+        return Ok(std::path::PathBuf::from("java"));
+    }
+
+    let (os, arch) = adoptium_os_arch()?;
+    tracing::info!(
+        os,
+        arch,
+        "system Java not found; querying Adoptium for newest portable Temurin JRE"
+    );
+    let releases: serde_json::Value = client
+        .get("https://api.adoptium.net/v3/info/available_releases")
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Cannot query Adoptium available_releases: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+    let mut candidates = Vec::new();
+    for key in ["most_recent_feature_release", "most_recent_lts"] {
+        if let Some(ver) = releases[key].as_u64()
+            && !candidates.contains(&ver)
+        {
+            candidates.push(ver);
+        }
+    }
+    if candidates.is_empty() {
+        candidates.push(25);
+    }
+
+    let mut chosen_pkg = None;
+    for feature_ver in candidates {
+        let url = format!(
+            "https://api.adoptium.net/v3/assets/latest/{feature_ver}/hotspot?image_type=jre&os={os}&arch={arch}&vendor=eclipse"
+        );
+        if let Ok(resp) = client.get(&url).send().and_then(|r| r.error_for_status())
+            && let Ok(assets) = resp.json::<serde_json::Value>()
+            && let Some(first) = assets.as_array().and_then(|a| a.first())
+            && first["binary"]["package"]["link"].as_str().is_some()
+        {
+            tracing::info!(
+                java_version = feature_ver,
+                "selected newest portable Temurin JRE"
+            );
+            chosen_pkg = Some(first["binary"]["package"].clone());
+            break;
+        }
+    }
+    let pkg =
+        chosen_pkg.ok_or("Adoptium API returned no portable JRE package for this platform")?;
+    let download_url = pkg["link"]
+        .as_str()
+        .ok_or("Adoptium JRE package missing download link")?;
+    let expected_sha256 = pkg["checksum"]
+        .as_str()
+        .ok_or("Adoptium JRE package missing SHA-256 checksum")?;
+    let archive_name = pkg["name"].as_str().unwrap_or("jre.tar.gz");
+
+    let resp = client
+        .get(download_url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Cannot download portable JRE: {e}"))?;
+    let mut bytes = Vec::new();
+    resp.take(256 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if bytes.is_empty() || bytes.len() > 256 * 1024 * 1024 || actual_sha256 != expected_sha256 {
+        return Err("Downloaded portable JRE failed SHA-256 verification".into());
+    }
+
+    let archive_path = work.join(archive_name);
+    std::fs::write(&archive_path, &bytes).map_err(|e| e.to_string())?;
+    drop(bytes);
+
+    let jre_dir = work.join("jre");
+    std::fs::create_dir_all(&jre_dir).map_err(|e| e.to_string())?;
+    let extract = Command::new("tar")
+        .arg("-xf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&jre_dir)
+        .status()
+        .map_err(|e| format!("Failed to run tar to extract portable JRE: {e}"))?;
+    let _ = std::fs::remove_file(&archive_path);
+    if !extract.success() {
+        return Err(format!("Failed to extract portable JRE (exit {extract})"));
+    }
+
+    find_java_in_dir(&jre_dir)
+        .ok_or_else(|| "Extracted portable JRE does not contain a java executable".into())
+}
+
+fn convert_mojang_reports(reports_dir: &Path, out_data_dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(out_data_dir).map_err(|e| e.to_string())?;
+    let registries_raw = std::fs::read(reports_dir.join("registries.json"))
+        .map_err(|e| format!("Cannot read generated registries.json: {e}"))?;
+    let registries: serde_json::Value = serde_json::from_slice(&registries_raw)
+        .map_err(|e| format!("Invalid generated registries.json: {e}"))?;
+
+    let blocks_raw = std::fs::read(reports_dir.join("blocks.json"))
+        .map_err(|e| format!("Cannot read generated blocks.json: {e}"))?;
+    let blocks_report: serde_json::Value = serde_json::from_slice(&blocks_raw)
+        .map_err(|e| format!("Invalid generated blocks.json: {e}"))?;
+
+    let collect_registry = |reg_key: &str| -> Result<Vec<(String, i32)>, String> {
+        let entries = registries[reg_key]["entries"]
+            .as_object()
+            .ok_or_else(|| format!("registries.json is missing {reg_key}.entries"))?;
+        let mut out: Vec<(String, i32)> = entries
+            .iter()
+            .filter_map(|(name, v)| {
+                v["protocol_id"]
+                    .as_i64()
+                    .and_then(|id| i32::try_from(id).ok())
+                    .map(|id| (name.clone(), id))
+            })
+            .collect();
+        out.sort_by_key(|(_, id)| *id);
+        Ok(out)
+    };
+
+    let items = collect_registry("minecraft:item")?;
+    let items_json = serde_json::json!({
+        "entries": items.iter().map(|(name, id)| serde_json::json!({ "name": name, "id": id })).collect::<Vec<_>>()
+    });
+    std::fs::write(
+        out_data_dir.join("items.json"),
+        serde_json::to_vec(&items_json).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+
+    for (reg_key, file_name) in [
+        ("minecraft:entity_type", "entities.json"),
+        ("minecraft:menu", "menus.json"),
+    ] {
+        let entries = collect_registry(reg_key)?;
+        let json = serde_json::json!({
+            "entries": entries.iter().map(|(name, id)| serde_json::json!({ "id": name, "id_num": id })).collect::<Vec<_>>()
+        });
+        std::fs::write(
+            out_data_dir.join(file_name),
+            serde_json::to_vec(&json).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let block_ids: BTreeMap<String, u16> = collect_registry("minecraft:block")?
+        .into_iter()
+        .filter_map(|(name, id)| u16::try_from(id).ok().map(|u| (name, u)))
+        .collect();
+    let blocks_obj = blocks_report
+        .as_object()
+        .ok_or("generated blocks.json must be a JSON object")?;
+    let mut converted_blocks = Vec::with_capacity(blocks_obj.len());
+    for (name, def) in blocks_obj {
+        let block_id = *block_ids
+            .get(name)
+            .ok_or_else(|| format!("block '{name}' missing from minecraft:block registry"))?;
+        let states = def["states"]
+            .as_array()
+            .ok_or_else(|| format!("block '{name}' has no states array"))?;
+        let mut min_state = u16::MAX;
+        let mut max_state = 0u16;
+        let mut default_state = None;
+        for st in states {
+            let sid = st["id"]
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .ok_or_else(|| format!("invalid state id for block '{name}'"))?;
+            min_state = min_state.min(sid);
+            max_state = max_state.max(sid);
+            if st["default"].as_bool() == Some(true) {
+                default_state = Some(sid);
+            }
+        }
+        if min_state > max_state {
+            return Err(format!("block '{name}' has empty states"));
+        }
+        converted_blocks.push((
+            block_id,
+            serde_json::json!({
+                "block_id": block_id,
+                "name": name,
+                "default_state": default_state.unwrap_or(min_state),
+                "min_state": min_state,
+                "max_state": max_state,
+            }),
+        ));
+    }
+    converted_blocks.sort_by_key(|(id, _)| *id);
+    let blocks_json = serde_json::json!({
+        "blocks": converted_blocks.into_iter().map(|(_, v)| v).collect::<Vec<_>>()
+    });
+    std::fs::write(
+        out_data_dir.join("blocks.json"),
+        serde_json::to_vec(&blocks_json).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_mojang_reports_to_radbyte_schema() {
+        let root = std::env::temp_dir().join(format!("rad-reports-test-{}", std::process::id()));
+        let reports = root.join("reports");
+        let out = root.join("out");
+        std::fs::create_dir_all(&reports).unwrap();
+
+        std::fs::write(
+            reports.join("registries.json"),
+            r#"{
+              "minecraft:block": { "entries": { "minecraft:air": { "protocol_id": 0 }, "minecraft:stone": { "protocol_id": 1 } } },
+              "minecraft:item": { "entries": { "minecraft:air": { "protocol_id": 0 }, "minecraft:stone": { "protocol_id": 1 } } },
+              "minecraft:entity_type": { "entries": { "minecraft:pig": { "protocol_id": 94 } } },
+              "minecraft:menu": { "entries": { "minecraft:generic_9x3": { "protocol_id": 2 } } }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            reports.join("blocks.json"),
+            r#"{
+              "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+              "minecraft:stone": { "states": [ { "id": 1, "default": true } ] }
+            }"#,
+        )
+        .unwrap();
+
+        convert_mojang_reports(&reports, &out).unwrap();
+        let blocks: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("blocks.json")).unwrap()).unwrap();
+        assert_eq!(blocks["blocks"][1]["name"], "minecraft:stone");
+        assert_eq!(blocks["blocks"][1]["default_state"], 1);
+        let entities: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(out.join("entities.json")).unwrap()).unwrap();
+        assert_eq!(entities["entries"][0]["id"], "minecraft:pig");
+        assert_eq!(entities["entries"][0]["id_num"], 94);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn eula_file_parsing_respects_comments_and_case() {
+        let root = std::env::temp_dir().join(format!("rad-eula-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let p = root.join("eula.txt");
+        write_eula_file(&p, false).unwrap();
+        assert!(!is_eula_file_accepted(&p));
+        write_eula_file(&p, true).unwrap();
+        assert!(is_eula_file_accepted(&p));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     #[ignore = "requires a tagged release and locally supplied version data"]
