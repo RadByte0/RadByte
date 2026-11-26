@@ -1,10 +1,8 @@
 //! RadServer — host launcher that verifies and dynamically loads the Minecraft version DLL.
 
 #![warn(missing_docs)]
-#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
-#[cfg(windows)]
-mod gui_windows;
+mod api_install;
 mod version_download;
 mod version_install;
 mod version_selection;
@@ -13,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 use libloading::{Library, Symbol};
 use mimalloc::MiMalloc;
-use rad_core::cli::{print_startup_banner, resolve_config_path};
+use rad_core::cli::{exit_with_pause, print_startup_banner, resolve_config_path};
+use rad_core::console_ui::{ConsoleUi, make_log_writer};
 use rad_core::version_package::{
     LoadedVersionPackage, RAD_VERSION_ABI_VERSION, RAD_VERSION_OK, RadServerStartOptions,
     RadVersionInfo, VersionManifest,
@@ -41,25 +40,8 @@ fn cstr_bytes_to_str(buf: &[u8]) -> &str {
 }
 
 fn main() {
-    #[cfg(windows)]
-    if std::env::args_os().skip(1).any(|arg| arg == "--nogui") {
-        // GUI builds do not create a console on double-click; console mode attaches
-        // to an existing terminal while inherited pipes continue to work.
-        unsafe {
-            AttachConsole(u32::MAX);
-        }
-    }
-    #[cfg(windows)]
-    if !std::env::args_os().skip(1).any(|arg| arg == "--nogui") {
-        match gui_windows::run() {
-            Ok(code) => std::process::exit(code),
-            Err(err) => {
-                eprintln!("RadServer GUI error: {err}");
-                std::process::exit(1);
-            }
-        }
-    }
     tracing_subscriber::fmt()
+        .with_writer(make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -77,14 +59,16 @@ fn main() {
 
     if let Err(e) = version_install::ensure_installed_headless(work_dir, &versions_dir) {
         error!(error = %e, "version setup required before starting RadServer");
-        std::process::exit(1);
+        exit_with_pause(1);
     }
+
+    let _console_ui = ConsoleUi::start("RadServer", env!("CARGO_PKG_VERSION"), "help, op, stop");
 
     let selected_version = match version_selection::load(&versions_dir) {
         Ok(version) => version,
         Err(e) => {
             error!(error = %e, "failed to select Minecraft version");
-            std::process::exit(1);
+            exit_with_pause(1);
         }
     };
     let version_package =
@@ -96,13 +80,13 @@ fn main() {
                     versions_dir = %versions_dir.display(),
                     "failed to load required Minecraft version package before opening port"
                 );
-                std::process::exit(1);
+                exit_with_pause(1);
             }
         };
 
     if let Err(e) = version_download::install_missing(&version_package) {
         error!(error = %e, "failed to install missing version library");
-        std::process::exit(1);
+        exit_with_pause(1);
     }
 
     let lib_path = match version_package.verify_and_resolve_library_path() {
@@ -113,7 +97,7 @@ fn main() {
                 versions_dir = %versions_dir.display(),
                 "failed to verify native Minecraft version library before opening port"
             );
-            std::process::exit(1);
+            exit_with_pause(1);
         }
     };
 
@@ -125,7 +109,19 @@ fn main() {
                 library = %lib_path.display(),
                 "failed to load native Minecraft version library"
             );
-            std::process::exit(1);
+            exit_with_pause(1);
+        }
+    };
+
+    let _api_library = match api_install::ensure_api_installed_if_needed(work_dir, 1) {
+        Ok(Some(lib)) => {
+            info!(api_version = 1, "loaded on-demand RadAPI runtime");
+            Some(lib)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, api_version = 1, "RadAPI runtime unavailable; continuing with built-in API");
+            None
         }
     };
 
@@ -144,14 +140,8 @@ fn main() {
     };
 
     if exit_code != 0 {
-        std::process::exit(exit_code);
+        exit_with_pause(exit_code);
     }
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn AttachConsole(process_id: u32) -> i32;
 }
 
 fn verify_loaded_library_info(

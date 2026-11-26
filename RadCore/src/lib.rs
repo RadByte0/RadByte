@@ -51,7 +51,7 @@ pub mod registry_provider;
 pub mod security;
 pub mod version_package;
 
-pub use app::{cli, error, radon, text};
+pub use app::{api_runtime, cli, console_ui, error, radon, text};
 pub use protocol::{codec, nbt, state, types, version};
 pub use security::{crypto, forwarding};
 pub use version::GameVersion;

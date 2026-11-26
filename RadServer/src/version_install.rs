@@ -51,15 +51,102 @@ fn release_target() -> Result<(&'static str, &'static str), String> {
     }
 }
 
+/// Release entry discovered on GitHub Releases for the current platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableRelease {
+    /// GitHub release tag (e.g. `"v0.3.3"`).
+    pub tag: String,
+    /// Minecraft game version extracted from the matching `rad-version-<ver>-...` asset.
+    pub game_version: String,
+}
+
+fn release_repo() -> Result<&'static str, String> {
+    let repo = option_env!("RADBYTE_RELEASE_REPOSITORY").unwrap_or("RadByte0/RadByte");
+    if !repo
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/.-_".contains(&b))
+    {
+        return Err("Invalid release repository".into());
+    }
+    Ok(repo)
+}
+
+/// Fetches recent GitHub Releases that ship a matching native `rad-version` library for this OS/arch.
+pub fn fetch_available_releases() -> Result<Vec<AvailableRelease>, String> {
+    let repo = release_repo()?;
+    let (target, ext) = release_target()?;
+    let suffix = format!("-{target}.{ext}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let releases: Vec<serde_json::Value> = client
+        .get(format!(
+            "https://api.github.com/repos/{repo}/releases?per_page=15"
+        ))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Cannot fetch GitHub releases: {e}"))?
+        .json()
+        .map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    for rel in releases {
+        if rel["draft"].as_bool() == Some(true) {
+            continue;
+        }
+        let Some(tag) = rel["tag_name"].as_str() else {
+            continue;
+        };
+        let Some(assets) = rel["assets"].as_array() else {
+            continue;
+        };
+        for asset in assets {
+            let Some(name) = asset["name"].as_str() else {
+                continue;
+            };
+            if let Some(rest) = name.strip_prefix("rad-version-")
+                && let Some(ver) = rest.strip_suffix(&suffix)
+                && !ver.is_empty()
+            {
+                out.push(AvailableRelease {
+                    tag: tag.to_owned(),
+                    game_version: ver.to_owned(),
+                });
+                break;
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("No compatible releases found on GitHub.".into());
+    }
+    Ok(out)
+}
+
 pub fn install(versions: &Path, data: &Path) -> Result<(), String> {
+    install_with_tag(versions, data, None)
+}
+
+pub fn install_with_tag(
+    versions: &Path,
+    data: &Path,
+    tag_override: Option<&str>,
+) -> Result<(), String> {
     install_with_source(
         versions,
         data,
         "local user-supplied data; provenance not verified",
+        tag_override,
     )
 }
 
-fn install_with_source(versions: &Path, data: &Path, source_label: &str) -> Result<(), String> {
+fn install_with_source(
+    versions: &Path,
+    data: &Path,
+    source_label: &str,
+    tag_override: Option<&str>,
+) -> Result<(), String> {
     let selection = versions.join("version.toml");
     if selection.exists() {
         let selected = crate::version_selection::load(versions)?;
@@ -69,8 +156,10 @@ fn install_with_source(versions: &Path, data: &Path, source_label: &str) -> Resu
             ));
         }
     }
-    let tag = option_env!("RADBYTE_RELEASE_TAG")
-        .filter(|tag| !tag.is_empty())
+    let tag = tag_override
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .or(option_env!("RADBYTE_RELEASE_TAG").filter(|tag| !tag.is_empty()))
         .or(Some(concat!("v", env!("CARGO_PKG_VERSION"))))
         .filter(|tag| {
             tag.starts_with('v')
@@ -79,13 +168,7 @@ fn install_with_source(versions: &Path, data: &Path, source_label: &str) -> Resu
                     .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
         })
         .ok_or("Installation is available in GitHub release builds only.")?;
-    let repo = option_env!("RADBYTE_RELEASE_REPOSITORY").unwrap_or("RadByte0/RadByte");
-    if !repo
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"/.-_".contains(&b))
-    {
-        return Err("Invalid release repository".into());
-    }
+    let repo = release_repo()?;
     let (target, ext) = release_target()?;
     let preferred_name = format!("rad-version-26.3-{target}.{ext}");
     let legacy_name = format!("rad_version_26_3-{target}.{ext}");
@@ -268,7 +351,7 @@ fn install_with_source(versions: &Path, data: &Path, source_label: &str) -> Resu
     result
 }
 
-/// Ensures version `26.3` is installed in headless mode (via `import/` or Mojang `--reports` after EULA).
+/// Ensures version `26.3` is installed (via `import/`, interactive console setup, or Mojang `--reports` after EULA).
 pub fn ensure_installed_headless(work_dir: &Path, versions_dir: &Path) -> Result<(), String> {
     if versions_dir.join("26.3").join("version.json").is_file() {
         return Ok(());
@@ -284,8 +367,145 @@ pub fn ensure_installed_headless(work_dir: &Path, versions_dir: &Path) -> Result
     }
 
     let _ = std::fs::create_dir_all(&import_dir);
+    if std::io::stdin().is_terminal() {
+        match prompt_console_setup()? {
+            ConsoleSetupChoice::Mojang(tag) => {
+                ensure_eula_accepted(work_dir, &import_dir)?;
+                return install_from_mojang_with_progress(
+                    versions_dir,
+                    tag.as_deref(),
+                    &mut |msg| println!("  \x1b[38;2;232;125;13m>\x1b[0m {msg}"),
+                );
+            }
+            ConsoleSetupChoice::Local { path, tag } => {
+                return install_with_tag(versions_dir, Path::new(&path), tag.as_deref());
+            }
+        }
+    }
+
     ensure_eula_accepted(work_dir, &import_dir)?;
-    install_from_mojang(versions_dir)
+    install_from_mojang_with_progress(versions_dir, None, &mut |msg| tracing::info!("{msg}"))
+}
+
+enum ConsoleSetupChoice {
+    Mojang(Option<String>),
+    Local { path: String, tag: Option<String> },
+}
+
+fn filter_console_releases(
+    all: &[AvailableRelease],
+    query: &str,
+    show_older: bool,
+) -> Vec<AvailableRelease> {
+    let q = query.trim().to_ascii_lowercase();
+    let mut seen_versions = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for rel in all {
+        if !show_older && !seen_versions.insert(rel.game_version.clone()) {
+            continue;
+        }
+        if q.is_empty()
+            || rel.game_version.to_ascii_lowercase().contains(&q)
+            || rel.tag.to_ascii_lowercase().contains(&q)
+        {
+            out.push(rel.clone());
+        }
+    }
+    out
+}
+
+fn prompt_console_setup() -> Result<ConsoleSetupChoice, String> {
+    println!(
+        "  \x1b[38;2;232;125;13m[FIRST-RUN SETUP]\x1b[0m Fetching available RadByte releases..."
+    );
+    let all = match fetch_available_releases() {
+        Ok(list) if !list.is_empty() => list,
+        _ => vec![AvailableRelease {
+            tag: option_env!("RADBYTE_RELEASE_TAG")
+                .filter(|s| !s.is_empty())
+                .unwrap_or("latest")
+                .to_owned(),
+            game_version: "26.3".to_owned(),
+        }],
+    };
+    let mut show_older = false;
+    let mut query = String::new();
+    let stdin = std::io::stdin();
+    loop {
+        let filtered = filter_console_releases(&all, &query, show_older);
+        println!();
+        println!(
+            "  \x1b[1;37mAvailable versions\x1b[0m (older: {}, filter: {}):",
+            if show_older { "shown" } else { "hidden" },
+            if query.is_empty() { "none" } else { &query }
+        );
+        if filtered.is_empty() {
+            println!("    \x1b[90m(no releases match filter)\x1b[0m");
+        } else {
+            for (idx, rel) in filtered.iter().take(20).enumerate() {
+                let marker = if idx == 0 {
+                    "\x1b[38;2;232;125;13m*\x1b[0m"
+                } else {
+                    " "
+                };
+                println!(
+                    "   {marker} \x1b[1;37m[{}]\x1b[0m Minecraft {}  \x1b[90m({})\x1b[0m",
+                    idx + 1,
+                    rel.game_version,
+                    rel.tag
+                );
+            }
+        }
+        println!(
+            "  \x1b[90mCommands: [Enter]=#1, [1..N]=select, [a]=toggle older, [s <text>]=search, [local <dir>]=local data\x1b[0m"
+        );
+        print!("  \x1b[38;2;232;125;13m>\x1b[0m Select version [1]: ");
+        let _ = std::io::stdout().flush();
+
+        let mut input = String::new();
+        stdin
+            .lock()
+            .read_line(&mut input)
+            .map_err(|e| format!("Failed to read console input: {e}"))?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            let tag = filtered
+                .first()
+                .map(|r| r.tag.clone())
+                .filter(|t| t != "latest");
+            return Ok(ConsoleSetupChoice::Mojang(tag));
+        }
+        if trimmed.eq_ignore_ascii_case("a") || trimmed.eq_ignore_ascii_case("all") {
+            show_older = !show_older;
+            continue;
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("s ")
+            .or_else(|| trimmed.strip_prefix("search "))
+        {
+            query = rest.trim().to_owned();
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("s") || trimmed.eq_ignore_ascii_case("search") {
+            query.clear();
+            continue;
+        }
+        if let Some(local_dir) = trimmed.strip_prefix("local ") {
+            let path = local_dir.trim().trim_matches('"').to_owned();
+            let tag = filtered
+                .first()
+                .map(|r| r.tag.clone())
+                .filter(|t| t != "latest");
+            return Ok(ConsoleSetupChoice::Local { path, tag });
+        }
+        if let Ok(num) = trimmed.parse::<usize>()
+            && let Some(rel) = num.checked_sub(1).and_then(|i| filtered.get(i))
+        {
+            let tag = (rel.tag != "latest").then(|| rel.tag.clone());
+            return Ok(ConsoleSetupChoice::Mojang(tag));
+        }
+        println!("  \x1b[31mInvalid selection.\x1b[0m");
+    }
 }
 
 fn is_eula_file_accepted(eula_path: &Path) -> bool {
@@ -358,8 +578,23 @@ fn ensure_eula_accepted(work_dir: &Path, import_dir: &Path) -> Result<(), String
     ))
 }
 
-/// Downloads official Minecraft `server.jar`, runs `--reports`, converts outputs, and installs `26.3`.
-pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
+fn hide_console_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Downloads official Minecraft `server.jar`, runs `--reports`, converts outputs, and streams progress lines.
+pub fn install_from_mojang_with_progress(
+    versions: &Path,
+    tag_override: Option<&str>,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
@@ -367,6 +602,7 @@ pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     tracing::info!("fetching Mojang version manifest for Minecraft 26.3");
+    on_progress("Fetching Mojang version manifest for Minecraft 26.3...");
     let manifest: serde_json::Value = client
         .get(MOJANG_MANIFEST_URL)
         .send()
@@ -401,9 +637,10 @@ pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
     std::fs::create_dir(&work).map_err(|e| format!("Cannot create temporary dir: {e}"))?;
 
     let result = (|| -> Result<(), String> {
-        let java_bin = resolve_or_fetch_portable_java(&client, &work)?;
+        let java_bin = resolve_or_fetch_portable_java(&client, &work, on_progress)?;
 
         tracing::info!("downloading official Minecraft 26.3 server.jar");
+        on_progress("Downloading official Minecraft 26.3 server.jar...");
         let resp = client
             .get(server_url)
             .send()
@@ -430,7 +667,10 @@ pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
 
         let reports_out = work.join("gen");
         tracing::info!("running Mojang data generator (--reports) to build local registry tables");
-        let status = Command::new(&java_bin)
+        on_progress("Running Mojang data generator (--reports)...");
+        let mut java_cmd = Command::new(&java_bin);
+        hide_console_window(&mut java_cmd);
+        let mut child = java_cmd
             .current_dir(&work)
             .arg("-DbundlerMainClass=net.minecraft.data.Main")
             .arg("-jar")
@@ -438,20 +678,54 @@ pub fn install_from_mojang(versions: &Path) -> Result<(), String> {
             .arg("--reports")
             .arg("--output")
             .arg("gen")
-            .status()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| format!("Failed to launch Java data generator: {e}"))?;
-        if !status.success() {
-            return Err(format!(
-                "Minecraft data generator exited with status {status}"
-            ));
+
+        let stderr_handle = child.stderr.take().map(|err| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                let mut reader = std::io::BufReader::new(err);
+                let _ = reader.read_to_string(&mut buf);
+                buf
+            })
+        });
+
+        if let Some(out) = child.stdout.take() {
+            let reader = std::io::BufReader::new(out);
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    on_progress(trimmed);
+                }
+            }
         }
 
+        let status = child
+            .wait()
+            .map_err(|e| format!("Failed to wait for Java data generator: {e}"))?;
+        let stderr_text = stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        if !status.success() {
+            let detail = stderr_text.lines().last().unwrap_or("").trim();
+            return Err(if detail.is_empty() {
+                format!("Minecraft data generator exited with status {status}")
+            } else {
+                format!("Minecraft data generator exited with status {status}: {detail}")
+            });
+        }
+
+        on_progress("Converting Mojang registry reports...");
         let data_dir = work.join("data");
         convert_mojang_reports(&reports_out.join("reports"), &data_dir)?;
+        on_progress("Downloading and installing RadByte version library...");
         install_with_source(
             versions,
             &data_dir,
             "generated locally via Mojang server.jar --reports after EULA acceptance",
+            tag_override,
         )
     })();
 
@@ -505,8 +779,12 @@ fn find_java_in_dir(dir: &Path) -> Option<std::path::PathBuf> {
 fn resolve_or_fetch_portable_java(
     client: &reqwest::blocking::Client,
     work: &Path,
+    on_progress: &mut dyn FnMut(&str),
 ) -> Result<std::path::PathBuf, String> {
-    let sys_ok = Command::new("java")
+    on_progress("Checking Java runtime...");
+    let mut sys_cmd = Command::new("java");
+    hide_console_window(&mut sys_cmd);
+    let sys_ok = sys_cmd
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -522,6 +800,7 @@ fn resolve_or_fetch_portable_java(
         arch,
         "system Java not found; querying Adoptium for newest portable Temurin JRE"
     );
+    on_progress("Java not found; downloading portable Temurin JRE...");
     let releases: serde_json::Value = client
         .get("https://api.adoptium.net/v3/info/available_releases")
         .send()
@@ -589,11 +868,16 @@ fn resolve_or_fetch_portable_java(
 
     let jre_dir = work.join("jre");
     std::fs::create_dir_all(&jre_dir).map_err(|e| e.to_string())?;
-    let extract = Command::new("tar")
+    on_progress("Extracting portable Temurin JRE...");
+    let mut tar_cmd = Command::new("tar");
+    hide_console_window(&mut tar_cmd);
+    let extract = tar_cmd
         .arg("-xf")
         .arg(&archive_path)
         .arg("-C")
         .arg(&jre_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("Failed to run tar to extract portable JRE: {e}"))?;
     let _ = std::fs::remove_file(&archive_path);

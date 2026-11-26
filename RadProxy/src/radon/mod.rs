@@ -7,6 +7,8 @@
 //! - Declarative `*.toml` manifests (e.g. hostname-based backend routing).
 //! - Native Rust implementations of [`ProxyRadon`].
 
+mod api_runtime;
+
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -336,8 +338,18 @@ impl RadonManager {
         radons_dir: impl AsRef<Path>,
         radonfigs_dir: impl AsRef<Path>,
     ) -> Result<()> {
+        let radons_path = radons_dir.as_ref();
+        let base_dir = radons_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if let Err(err) =
+            api_runtime::ensure_api_installed_if_needed(base_dir, radons_path, API_VERSION)
+        {
+            warn!(error = %err, api_version = API_VERSION, "RadAPI runtime unavailable; continuing with built-in API");
+        }
         self.load_radonfigs(radonfigs_dir)?;
-        self.load_from_dir(radons_dir)
+        self.load_from_dir(radons_path)
     }
 
     /// Ensures `radonfigs_dir` exists and loads per-radon `*.toml` config files.

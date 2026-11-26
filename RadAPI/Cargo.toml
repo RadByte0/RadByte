@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "Versioned plugin & WASM guest SDK for RadProxy radons (v1 and future APIs)."
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [features]
 default = ["v1", "proxy"]
 v1 = []

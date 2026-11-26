@@ -16,6 +16,9 @@
 
 #![warn(missing_docs)]
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ffi;
+
 #[cfg(feature = "v1")]
 pub mod v1;
 

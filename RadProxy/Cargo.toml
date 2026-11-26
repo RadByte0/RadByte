@@ -10,6 +10,7 @@ description = "High-performance L7 Minecraft proxy and traffic filter for the Ra
 arc-swap.workspace = true
 base64.workspace = true
 bytes.workspace = true
+libloading.workspace = true
 mimalloc.workspace = true
 rad-api = { path = "../RadAPI" }
 rad-core = { path = "../RadCore", default-features = false }

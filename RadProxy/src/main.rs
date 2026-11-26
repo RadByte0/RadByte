@@ -12,9 +12,9 @@ mod radon;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use rad_core::cli::{print_startup_banner, resolve_config_path};
+use rad_core::cli::{exit_with_pause, print_startup_banner, resolve_config_path};
+use rad_core::console_ui::{ConsoleUi, make_log_writer};
 use rad_core::{MINECRAFT_VERSION, PROTOCOL_VERSION};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -33,7 +33,13 @@ const PROXY_BANNER: &str = r"
 ";
 
 fn main() {
+    let _console_ui = ConsoleUi::start(
+        "RadProxy",
+        env!("CARGO_PKG_VERSION"),
+        "reload, status, stop",
+    );
     tracing_subscriber::fmt()
+        .with_writer(make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "rad_proxy=info".into()),
@@ -45,7 +51,7 @@ fn main() {
     for dir in ["radons", "radonfigs"] {
         if let Err(e) = std::fs::create_dir_all(dir) {
             error!(error = %e, dir, "failed to create proxy directory");
-            std::process::exit(1);
+            exit_with_pause(1);
         }
     }
 
@@ -54,7 +60,7 @@ fn main() {
         Ok(cfg) => cfg,
         Err(err) => {
             error!(%err, path = %cfg_path.display(), "failed to load config");
-            std::process::exit(1);
+            exit_with_pause(1);
         }
     };
     info!(config_version = config.config_version, config = %cfg_path.display(), "loaded config");
@@ -70,7 +76,7 @@ fn main() {
             Ok(kp) => Some(kp),
             Err(err) => {
                 error!(%err, "failed to generate RSA keypair");
-                std::process::exit(1);
+                exit_with_pause(1);
             }
         }
     } else {
@@ -150,7 +156,7 @@ fn run_thread_per_core(
                         Ok(l) => l,
                         Err(err) => {
                             error!(%bind_addr, worker = idx, %err, "failed to bind TCP listener");
-                            std::process::exit(1);
+                            exit_with_pause(1);
                         }
                     };
                     loop {
@@ -196,7 +202,7 @@ fn run_multi_thread(
             Ok(l) => l,
             Err(err) => {
                 error!(%bind_addr, %err, "failed to bind TCP listener");
-                std::process::exit(1);
+                exit_with_pause(1);
             }
         };
 
@@ -233,11 +239,13 @@ fn run_multi_thread(
 }
 
 async fn run_control_loop(state: Arc<ProxyState>) {
-    let mut stdin_lines = BufReader::new(tokio::io::stdin()).lines();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    rad_core::console_ui::spawn_command_reader(move |line| cmd_tx.send(line).is_ok());
 
     loop {
         tokio::select! {
-            Ok(Some(line)) = stdin_lines.next_line() => {
+            Some(line) = cmd_rx.recv() => {
+                ConsoleUi::echo_command(line.trim());
                 if handle_console_command(line.trim(), &state) {
                     state.kick_all("Proxy is shutting down.");
                     state.current_radons().disable_all();

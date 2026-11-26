@@ -43,6 +43,7 @@ async fn shutdown_signal() {
 /// and `versions_dir` (`versions/`). Returns `0` on clean shutdown or non-zero on error.
 pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
     let _ = tracing_subscriber::fmt()
+        .with_writer(rad_core::console_ui::make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -165,15 +166,9 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
         );
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let stdin = std::io::stdin();
-            for line in stdin.lock().lines().map_while(Result::ok) {
-                let trimmed = line.trim().to_owned();
-                if !trimmed.is_empty() && cmd_tx.send(trimmed).is_err() {
-                    break;
-                }
-            }
+        rad_core::console_ui::spawn_command_reader(move |line| {
+            let trimmed = line.trim().to_owned();
+            trimmed.is_empty() || cmd_tx.send(trimmed).is_ok()
         });
 
         let stop_file = PathBuf::from(".radserver.stop");

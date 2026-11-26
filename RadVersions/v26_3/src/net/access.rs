@@ -109,7 +109,11 @@ impl AccessControl {
                 return Self::invalid_lists();
             }
         };
-        for (filename, is_ops) in [("ops.json", true), ("whitelist.json", false)] {
+        for (filename, kind) in [
+            ("ops.json", 0u8),
+            ("whitelist.json", 1u8),
+            ("banned-players.json", 2u8),
+        ] {
             let primary = Self::lists_dir(world_dir).join(filename);
             let legacy = world_dir.join(filename);
             let file = if primary.exists() { primary } else { legacy };
@@ -122,38 +126,52 @@ impl AccessControl {
                     continue;
                 }
             };
-            {
-                if is_ops {
-                    match serde_json::from_str::<Vec<OpEntry>>(&raw) {
-                        Ok(entries) => {
-                            loaded.op_entries = entries;
-                            loaded.ops.clear();
-                        }
-                        Err(e) => {
-                            loaded.lists_invalid = true;
-                            tracing::warn!(path = %file.display(), error = %e, "invalid operator list; refusing to overwrite it")
+            match kind {
+                0 => match serde_json::from_str::<Vec<OpEntry>>(&raw) {
+                    Ok(entries) => {
+                        loaded.op_entries = entries;
+                        loaded.ops.clear();
+                    }
+                    Err(e) => {
+                        loaded.lists_invalid = true;
+                        tracing::warn!(path = %file.display(), error = %e, "invalid operator list; refusing to overwrite it");
+                    }
+                },
+                1 => match serde_json::from_str::<Vec<WhitelistEntry>>(&raw) {
+                    Ok(entries) => {
+                        loaded.whitelist_entries = entries;
+                        loaded.whitelist.clear();
+                    }
+                    Err(e) => {
+                        loaded.lists_invalid = true;
+                        tracing::warn!(path = %file.display(), error = %e, "invalid whitelist; refusing to overwrite it");
+                    }
+                },
+                _ => match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+                    Ok(entries) => {
+                        loaded.banned.clear();
+                        for entry in entries {
+                            if let Some(name) = entry["name"].as_str() {
+                                loaded.banned.insert(name.to_ascii_lowercase());
+                            }
                         }
                     }
-                } else {
-                    match serde_json::from_str::<Vec<WhitelistEntry>>(&raw) {
-                        Ok(entries) => {
-                            loaded.whitelist_entries = entries;
-                            loaded.whitelist.clear();
-                        }
-                        Err(e) => {
-                            loaded.lists_invalid = true;
-                            tracing::warn!(path = %file.display(), error = %e, "invalid whitelist; refusing to overwrite it")
-                        }
+                    Err(e) => {
+                        loaded.lists_invalid = true;
+                        tracing::warn!(path = %file.display(), error = %e, "invalid banned-players list; refusing to overwrite it");
                     }
-                }
+                },
             }
         }
         loaded.sync_legacy_entries();
-        // Materialize missing Paper-style files on the next save, including
-        // when all entries came from a legacy access_control.json.
-        if ["ops.json", "whitelist.json"]
+        // Materialize missing vanilla files on the next save, or migrate away legacy access_control.json.
+        if ["ops.json", "whitelist.json", "banned-players.json"]
             .iter()
             .any(|name| !Self::lists_dir(world_dir).join(name).exists())
+            || Self::lists_dir(world_dir)
+                .join("access_control.json")
+                .exists()
+            || world_dir.join("access_control.json").exists()
         {
             loaded.mark_dirty();
         }
@@ -219,51 +237,45 @@ impl AccessControl {
         }
     }
 
-    /// Atomically writes an [`AccessControl`] snapshot to `<lists_dir>/access_control.json`, `ops.json`, and `whitelist.json`.
+    /// Atomically writes vanilla `ops.json`, `whitelist.json`, and `banned-players.json`.
     pub fn write_snapshot_atomic(world_dir: &std::path::Path, snap: &Self) -> std::io::Result<()> {
         if snap.lists_invalid {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "invalid ops.json or whitelist.json; fix it before saving",
+                "invalid ops.json, whitelist.json, or banned-players.json; fix it before saving",
             ));
         }
         let lists_dir = Self::lists_dir(world_dir);
         std::fs::create_dir_all(lists_dir)?;
-        let path = lists_dir.join("access_control.json");
-        let tmp = lists_dir.join(format!("access_control.json.{}", unique_tmp_suffix()));
-        let json = serde_json::to_string_pretty(snap)
-            .map_err(|e| std::io::Error::other(format!("access serialize failed: {e}")))?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)?;
-        let legacy_path = world_dir.join("access_control.json");
-        if legacy_path != path && legacy_path.exists() {
-            let _ = std::fs::remove_file(&legacy_path);
-        }
         let banned_players: Vec<serde_json::Value> = snap
             .banned
             .iter()
             .map(|name| serde_json::json!({ "name": name }))
             .collect();
-        if let Ok(banned_json) = serde_json::to_string_pretty(&banned_players) {
-            let bp_path = lists_dir.join("banned-players.json");
-            let bp_tmp = lists_dir.join(format!("banned-players.json.{}", unique_tmp_suffix()));
-            if std::fs::write(&bp_tmp, banned_json).is_ok() {
-                let _ = std::fs::rename(&bp_tmp, &bp_path);
-            }
-        }
         for (name, json) in [
             ("ops.json", serde_json::to_string_pretty(&snap.op_entries)),
             (
                 "whitelist.json",
                 serde_json::to_string_pretty(&snap.whitelist_entries),
             ),
+            (
+                "banned-players.json",
+                serde_json::to_string_pretty(&banned_players),
+            ),
         ] {
-            let lists_dir = Self::lists_dir(world_dir);
             let path = lists_dir.join(name);
             let tmp = lists_dir.join(format!("{name}.{}", unique_tmp_suffix()));
             let json = json.map_err(|e| std::io::Error::other(e.to_string()))?;
             std::fs::write(&tmp, json)?;
             std::fs::rename(&tmp, &path)?;
+        }
+        for legacy in [
+            lists_dir.join("access_control.json"),
+            world_dir.join("access_control.json"),
+        ] {
+            if legacy.exists() {
+                let _ = std::fs::remove_file(&legacy);
+            }
         }
         Ok(())
     }

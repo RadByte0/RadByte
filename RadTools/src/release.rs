@@ -37,6 +37,15 @@ pub fn stage(target: &str, build: &Path, out: &Path) -> Result<(), String> {
         format!("{library}{ext}"),
         format!("rad-version-26.3-{target}{ext}"),
     ));
+    let api_lib = if library.starts_with("lib") {
+        "librad_api"
+    } else {
+        "rad_api"
+    };
+    files.push((
+        format!("{api_lib}{ext}"),
+        format!("rad-api-v1-{target}{ext}"),
+    ));
     for (src, _) in &files {
         if !build.join(src).is_file() {
             return Err(format!(
@@ -71,10 +80,15 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
         ("RadProxy", "proxy"),
         ("RadLimbo", "limbo"),
         ("Version libraries", "version"),
+        ("API runtimes", "api"),
     ] {
         text.push_str(&format!("<details>\n<summary>{title}</summary>\n\n"));
         if service == "version" {
             text.push_str("**Minecraft 26.3**\n\n");
+        } else if service == "api" {
+            text.push_str(
+                "**RadAPI v1 (optional — auto-installed only when radons are present)**\n\n",
+            );
         }
         for (target, exe, _, libext) in TARGETS {
             let os = if target.contains("windows") {
@@ -91,6 +105,8 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
             };
             let file = if service == "version" {
                 format!("rad-version-26.3-{target}{libext}")
+            } else if service == "api" {
+                format!("rad-api-v1-{target}{libext}")
             } else {
                 format!("rad-{service}-{target}{exe}")
             };

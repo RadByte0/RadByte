@@ -1733,13 +1733,13 @@ async fn headless_whitelist_ops_console_and_restart_e2e() {
 
     stop_rad_server(guard1);
     assert!(
-        base_dir
+        !base_dir
             .join("custom_world")
             .join("access_control.json")
             .exists(),
-        "access_control.json must persist in custom_world"
+        "redundant access_control.json must not be created"
     );
-    for name in ["ops.json", "whitelist.json"] {
+    for name in ["ops.json", "whitelist.json", "banned-players.json"] {
         let json: serde_json::Value = serde_json::from_slice(
             &std::fs::read(base_dir.join(name)).expect("list must be next to server configuration"),
         )

@@ -11,14 +11,62 @@ use std::path::PathBuf;
 
 /// Prints the supplied artwork followed by the product and protocol versions.
 pub fn print_startup_banner(product_name: &str, crate_version: &str, ascii_art: &str) {
+    enable_ansi_colors();
+    if std::env::var_os("RADBYTE_ANTIGRAVITY_CLI").is_some_and(|v| v == "1") {
+        return;
+    }
     let version_line = format!(
-        "  {} v{} | Minecraft {} (protocol {})",
+        "\x1b[38;2;232;125;13m{ascii_art}\x1b[0m\n  \x1b[1;37m{}\x1b[0m \x1b[38;2;232;125;13mv{}\x1b[0m \x1b[90m|\x1b[0m Minecraft {} \x1b[90m(protocol {})\x1b[0m\n",
         product_name,
         crate_version,
         crate::MINECRAFT_VERSION,
         crate::PROTOCOL_VERSION
     );
-    println!("{ascii_art}\n{version_line}\n");
+    println!("{version_line}");
+}
+
+/// Enables ANSI escape sequence rendering on Windows consoles.
+pub fn enable_ansi_colors() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(std_handle: u32) -> isize;
+            fn GetConsoleMode(console_handle: isize, mode: *mut u32) -> i32;
+            fn SetConsoleMode(console_handle: isize, mode: u32) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+        unsafe {
+            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if handle != 0 && handle != -1 {
+                let mut mode = 0u32;
+                if GetConsoleMode(handle, &raw mut mode) != 0 {
+                    let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                }
+            }
+        }
+    }
+}
+
+/// Exits the process, pausing for Enter if running in a standalone double-clicked Windows console.
+pub fn exit_with_pause(code: i32) -> ! {
+    #[cfg(windows)]
+    if code != 0 {
+        use std::io::{IsTerminal, Read, Write};
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleProcessList(process_list: *mut u32, process_count: u32) -> u32;
+        }
+        let mut pids = [0u32; 2];
+        let count = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), 2) };
+        if count == 1 && std::io::stdin().is_terminal() {
+            print!("\nPress Enter to exit...");
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stdin().read(&mut [0u8]);
+        }
+    }
+    std::process::exit(code);
 }
 
 /// Selects the first configuration option from process arguments.

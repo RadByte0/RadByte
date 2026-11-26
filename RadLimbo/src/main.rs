@@ -9,7 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mimalloc::MiMalloc;
-use rad_core::cli::{print_startup_banner, resolve_config_path};
+use rad_core::cli::{exit_with_pause, print_startup_banner, resolve_config_path};
+use rad_core::console_ui::{ConsoleUi, make_log_writer};
 use rad_core::registry_provider::{
     BlockRegistryEntry, LoadedPackageRegistryProvider, RegistryProvider, RegistryProviderError,
     RegistryTagSet, TagDefinition, VersionMetadata,
@@ -67,9 +68,18 @@ impl RegistryProvider for LimboPackageProvider {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
+    let _console_ui = ConsoleUi::start("RadLimbo", env!("CARGO_PKG_VERSION"), "status, stop");
     tracing_subscriber::fmt()
+        .with_writer(make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -83,7 +93,7 @@ async fn main() {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e, path = %cfg_path.display(), "failed to load config");
-            std::process::exit(1);
+            exit_with_pause(1);
         }
     };
     info!(config_version = crate::config::LIMBO_CONFIG_VERSION, config = %cfg_path.display(), "loaded config");
@@ -113,7 +123,7 @@ async fn main() {
                         dir = %versions_dir.display(),
                         "invalid RadLimbo version data package; refusing startup"
                     );
-                    std::process::exit(1);
+                    exit_with_pause(1);
                 }
             }
         } else {
@@ -128,14 +138,37 @@ async fn main() {
         Ok(l) => l,
         Err(e) => {
             error!(%bind_addr, error = %e, "failed to bind RadLimbo listener");
-            std::process::exit(1);
+            exit_with_pause(1);
         }
     };
 
     info!(%bind_addr, ?forwarding, config = %cfg_path.display(), "RadLimbo listening");
 
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    rad_core::console_ui::spawn_command_reader(move |line| cmd_tx.send(line).is_ok());
+
     loop {
         tokio::select! {
+            Some(line) = cmd_rx.recv() => {
+                let cmd = line.trim();
+                ConsoleUi::echo_command(cmd);
+                match cmd.to_ascii_lowercase().as_str() {
+                    "stop" | "exit" | "quit" => {
+                        info!("shutting down RadLimbo");
+                        break;
+                    }
+                    "status" => {
+                        info!(%bind_addr, ?forwarding, "RadLimbo online");
+                    }
+                    "help" | "?" => {
+                        info!("commands: status, stop, help");
+                    }
+                    "" => {}
+                    other => {
+                        info!(command = other, "unknown command (try: status, stop, help)");
+                    }
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutting down RadLimbo");
                 break;

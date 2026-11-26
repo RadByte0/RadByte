@@ -176,9 +176,14 @@ async fn access_control_ban_whitelist_kick_and_persistence() {
 
     // Persist and reload into fresh ServerState
     state.save_all().await.unwrap();
-    assert!(dir.join("access_control.json").exists());
+    assert!(dir.join("ops.json").exists());
+    assert!(dir.join("whitelist.json").exists());
+    assert!(dir.join("banned-players.json").exists());
+    assert!(!dir.join("access_control.json").exists());
 
-    let reloaded = ServerState::new_with_world_dir(cfg, Some(dir.clone()));
+    let mut reload_cfg = cfg;
+    reload_cfg.white_list = Some(true);
+    let reloaded = ServerState::new_with_world_dir(reload_cfg, Some(dir.clone()));
     {
         let access = reloaded.access.read().await;
         assert!(access.is_banned("Griefer"));
