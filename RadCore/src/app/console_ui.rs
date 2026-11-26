@@ -220,10 +220,209 @@ impl Drop for RawTerminalGuard {
     }
 }
 
+struct ProcessMetricsSampler {
+    last_wall: std::time::Instant,
+    last_cpu_ns: u64,
+}
+
+impl ProcessMetricsSampler {
+    fn new() -> Self {
+        Self {
+            last_wall: std::time::Instant::now(),
+            last_cpu_ns: read_process_cpu_ns(),
+        }
+    }
+
+    /// Returns `(cpu_percent_per_thread, ram_megabits)`.
+    /// CPU percentage is 100.0% per fully utilized logical thread (can exceed 100% on multi-core).
+    fn sample(&mut self) -> (f64, f64) {
+        let now = std::time::Instant::now();
+        let cpu_ns = read_process_cpu_ns();
+        let wall_ns = now.duration_since(self.last_wall).as_nanos();
+        let delta_cpu = cpu_ns.saturating_sub(self.last_cpu_ns);
+        let cpu_pct = if wall_ns > 0 {
+            (delta_cpu as f64 / wall_ns as f64) * 100.0
+        } else {
+            0.0
+        };
+        self.last_wall = now;
+        self.last_cpu_ns = cpu_ns;
+        let ram_mbit = (read_process_rss_bytes() as f64 * 8.0) / 1_000_000.0;
+        (cpu_pct, ram_mbit)
+    }
+}
+
+fn read_process_cpu_ns() -> u64 {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn GetProcessTimes(
+                process: isize,
+                creation: *mut FileTime,
+                exit: *mut FileTime,
+                kernel: *mut FileTime,
+                user: *mut FileTime,
+            ) -> i32;
+        }
+        let mut c = FileTime::default();
+        let mut e = FileTime::default();
+        let mut k = FileTime::default();
+        let mut u = FileTime::default();
+        if unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &raw mut c,
+                &raw mut e,
+                &raw mut k,
+                &raw mut u,
+            )
+        } != 0
+        {
+            let kt = (u64::from(k.high) << 32) | u64::from(k.low);
+            let ut = (u64::from(u.high) << 32) | u64::from(u.low);
+            return kt.saturating_add(ut).saturating_mul(100);
+        }
+        0
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn sysconf(name: i32) -> isize;
+        }
+        const SC_CLK_TCK: i32 = 2;
+        let Ok(raw) = std::fs::read_to_string("/proc/self/stat") else {
+            return 0;
+        };
+        let Some(after_comm) = raw.rfind(')').map(|i| &raw[i + 2..]) else {
+            return 0;
+        };
+        let mut fields = after_comm.split_whitespace();
+        let utime: u64 = fields.nth(11).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let stime: u64 = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let clk_tck = unsafe { sysconf(SC_CLK_TCK) }.max(1) as u64;
+        utime.saturating_add(stime).saturating_mul(1_000_000_000) / clk_tck
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct TimeVal {
+            tv_sec: i64,
+            tv_usec: i64,
+        }
+        #[repr(C)]
+        struct RUsage {
+            ru_utime: TimeVal,
+            ru_stime: TimeVal,
+            _rest: [i64; 14],
+        }
+        unsafe extern "C" {
+            fn getrusage(who: i32, usage: *mut RUsage) -> i32;
+        }
+        let mut ru = unsafe { std::mem::zeroed::<RUsage>() };
+        if unsafe { getrusage(0, &raw mut ru) } == 0 {
+            let u_ns = (ru.ru_utime.tv_sec.max(0) as u64) * 1_000_000_000
+                + (ru.ru_utime.tv_usec.max(0) as u64) * 1_000;
+            let s_ns = (ru.ru_stime.tv_sec.max(0) as u64) * 1_000_000_000
+                + (ru.ru_stime.tv_usec.max(0) as u64) * 1_000;
+            return u_ns.saturating_add(s_ns);
+        }
+        0
+    }
+}
+
+fn read_process_rss_bytes() -> u64 {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn K32GetProcessMemoryInfo(
+                process: isize,
+                ppsmem_counters: *mut ProcessMemoryCounters,
+                cb: u32,
+            ) -> i32;
+        }
+        let mut pmc = ProcessMemoryCounters {
+            cb: core::mem::size_of::<ProcessMemoryCounters>() as u32,
+            ..Default::default()
+        };
+        if unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut pmc, pmc.cb) } != 0 {
+            return pmc.working_set_size as u64;
+        }
+        0
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(raw) = std::fs::read_to_string("/proc/self/status") else {
+            return 0;
+        };
+        for line in raw.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:")
+                && let Some(kb) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+            {
+                return kb.saturating_mul(1024);
+            }
+        }
+        0
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct TimeVal {
+            tv_sec: i64,
+            tv_usec: i64,
+        }
+        #[repr(C)]
+        struct RUsage {
+            ru_utime: TimeVal,
+            ru_stime: TimeVal,
+            ru_maxrss: i64,
+            _rest: [i64; 13],
+        }
+        unsafe extern "C" {
+            fn getrusage(who: i32, usage: *mut RUsage) -> i32;
+        }
+        let mut ru = unsafe { std::mem::zeroed::<RUsage>() };
+        if unsafe { getrusage(0, &raw mut ru) } == 0 {
+            return ru.ru_maxrss.max(0) as u64;
+        }
+        0
+    }
+}
+
 struct TuiState {
     product: String,
     version: String,
     hint: String,
+    cpu_pct: f64,
+    ram_mbit: f64,
     logs: VecDeque<String>,
     input: String,
     scroll_from_bottom: usize,
@@ -273,7 +472,15 @@ impl TuiState {
         out.push_str("\x1b[?25l\x1b[H");
 
         // Header (6 lines)
-        append_pixel_header(&mut out, &self.product, &self.version, &self.hint, width);
+        append_pixel_header(
+            &mut out,
+            &self.product,
+            &self.version,
+            &self.hint,
+            self.cpu_pct,
+            self.ram_mbit,
+            width,
+        );
         out.push_str(&format!("\x1b[2K\x1b[38;2;56;56;56m{divider}\x1b[0m\n"));
 
         // Log viewport (exact log_height lines)
@@ -355,7 +562,15 @@ fn wrap_ansi_or_plain(line: &str, max_cols: usize, out: &mut Vec<String>) {
     }
 }
 
-fn append_pixel_header(out: &mut String, product: &str, version: &str, hint: &str, _width: usize) {
+fn append_pixel_header(
+    out: &mut String,
+    product: &str,
+    version: &str,
+    hint: &str,
+    cpu_pct: f64,
+    ram_mbit: f64,
+    _width: usize,
+) {
     let rows = [
         (
             "\x1b[38;2;245;158;11m██████╗ \x1b[0m",
@@ -371,11 +586,13 @@ fn append_pixel_header(out: &mut String, product: &str, version: &str, hint: &st
         ),
         (
             "\x1b[38;2;232;125;13m██████╔╝\x1b[0m",
-            format!("\x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•  {hint}\x1b[0m"),
+            format!(
+                "\x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;232;125;13mCPU {cpu_pct:.1}%\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;245;158;11mRAM {ram_mbit:.1} Mbit\x1b[0m"
+            ),
         ),
         (
             "\x1b[38;2;217;119;6m██╔══██╗\x1b[0m",
-            "\x1b[90mScroll: Mouse / PgUp / PgDn  •  Enter: run command\x1b[0m".to_owned(),
+            format!("\x1b[90m{hint}  •  Scroll: Mouse / PgUp / PgDn\x1b[0m"),
         ),
         ("\x1b[38;2;180;83;9m██║  ██║\x1b[0m", String::new()),
     ];
@@ -448,10 +665,14 @@ impl ConsoleUi {
         }
 
         let raw_guard = Some(RawTerminalGuard::enter());
+        let mut sampler = ProcessMetricsSampler::new();
+        let (_, init_ram) = sampler.sample();
         let state = Arc::new(Mutex::new(TuiState {
             product: product.to_owned(),
             version: version.to_owned(),
             hint: hint.to_owned(),
+            cpu_pct: 0.0,
+            ram_mbit: init_ram,
             logs: VecDeque::new(),
             input: String::new(),
             scroll_from_bottom: 0,
@@ -481,12 +702,13 @@ impl ConsoleUi {
             }
         });
 
-        // Thread 2: receive log lines from any in-process or cdylib writer + detect resize.
+        // Thread 2: receive log lines from any in-process or cdylib writer + refresh metrics/resize.
         let log_stop = Arc::clone(&stop_flag);
         let log_state = Arc::clone(&state);
         let _ = log_sock.set_read_timeout(Some(Duration::from_millis(200)));
         let log_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            let mut ticks = 0u32;
             while !log_stop.load(Ordering::Relaxed) {
                 let mut changed = false;
                 if let Ok((n, _)) = log_sock.recv_from(&mut buf) {
@@ -497,10 +719,17 @@ impl ConsoleUi {
                     }
                     changed = true;
                 }
+                ticks = ticks.wrapping_add(1);
                 let size = terminal_size();
                 let mut st = log_state.lock().unwrap();
                 if st.last_size != size {
                     st.last_size = size;
+                    changed = true;
+                }
+                if ticks.is_multiple_of(5) {
+                    let (cpu_pct, ram_mbit) = sampler.sample();
+                    st.cpu_pct = cpu_pct;
+                    st.ram_mbit = ram_mbit;
                     changed = true;
                 }
                 if changed {
