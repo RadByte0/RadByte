@@ -358,11 +358,11 @@ fn wrap_ansi_or_plain(line: &str, max_cols: usize, out: &mut Vec<String>) {
 fn append_pixel_header(out: &mut String, product: &str, version: &str, hint: &str, _width: usize) {
     let rows = [
         (
-            "\x1b[38;2;232;125;13m██████╗ \x1b[0m",
+            "\x1b[38;2;245;158;11m██████╗ \x1b[0m",
             format!("\x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m"),
         ),
         (
-            "\x1b[38;2;245;158;11m██╔══██╗\x1b[0m",
+            "\x1b[38;2;232;125;13m██╔══██╗\x1b[0m",
             format!(
                 "\x1b[90mMinecraft {} (protocol {})\x1b[0m",
                 crate::MINECRAFT_VERSION,
@@ -370,14 +370,14 @@ fn append_pixel_header(out: &mut String, product: &str, version: &str, hint: &st
             ),
         ),
         (
-            "\x1b[38;2;59;130;246m██████╔╝\x1b[0m",
+            "\x1b[38;2;232;125;13m██████╔╝\x1b[0m",
             format!("\x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•  {hint}\x1b[0m"),
         ),
         (
-            "\x1b[38;2;99;102;241m██╔══██╗\x1b[0m",
+            "\x1b[38;2;217;119;6m██╔══██╗\x1b[0m",
             "\x1b[90mScroll: Mouse / PgUp / PgDn  •  Enter: run command\x1b[0m".to_owned(),
         ),
-        ("\x1b[38;2;139;92;246m██║  ██║\x1b[0m", String::new()),
+        ("\x1b[38;2;180;83;9m██║  ██║\x1b[0m", String::new()),
     ];
     for (art, info) in rows {
         if info.is_empty() {
