@@ -1,6 +1,6 @@
 use std::path::Path;
 
-const TARGETS: [(&str, &str, &str, &str); 6] = [
+const TARGETS: [(&str, &str, &str, &str); 8] = [
     ("x86_64-pc-windows-msvc", ".exe", "rad_version_26_3", ".dll"),
     (
         "aarch64-pc-windows-msvc",
@@ -11,6 +11,18 @@ const TARGETS: [(&str, &str, &str, &str); 6] = [
     ("x86_64-unknown-linux-gnu", "", "librad_version_26_3", ".so"),
     (
         "aarch64-unknown-linux-gnu",
+        "",
+        "librad_version_26_3",
+        ".so",
+    ),
+    (
+        "x86_64-unknown-linux-musl",
+        "",
+        "librad_version_26_3",
+        ".so",
+    ),
+    (
+        "aarch64-unknown-linux-musl",
         "",
         "librad_version_26_3",
         ".so",
@@ -94,11 +106,18 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
             } else {
                 "ARM64"
             };
+            let abi = if target.contains("musl") {
+                " (musl)"
+            } else {
+                ""
+            };
             let file = format!("rad-{service}-{target}{exe}");
             if !assets.join(&file).is_file() {
                 return Err(format!("Missing release asset: {file}"));
             }
-            text.push_str(&format!("- **{os} {arch}:** [Download]({base}/{file})\n"));
+            text.push_str(&format!(
+                "- **{os} {arch}{abi}:** [Download]({base}/{file})\n"
+            ));
         }
         text.push_str("\n</details>\n\n");
     }

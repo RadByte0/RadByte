@@ -7,6 +7,12 @@ pub fn api_target_info() -> Result<(&'static str, &'static str, &'static str), S
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => Ok(("x86_64-pc-windows-msvc", "", "dll")),
         ("windows", "aarch64") => Ok(("aarch64-pc-windows-msvc", "", "dll")),
+        ("linux", "x86_64") if cfg!(target_env = "musl") => {
+            Ok(("x86_64-unknown-linux-musl", "lib", "so"))
+        }
+        ("linux", "aarch64") if cfg!(target_env = "musl") => {
+            Ok(("aarch64-unknown-linux-musl", "lib", "so"))
+        }
         ("linux", "x86_64") => Ok(("x86_64-unknown-linux-gnu", "lib", "so")),
         ("linux", "aarch64") => Ok(("aarch64-unknown-linux-gnu", "lib", "so")),
         ("macos", "x86_64") => Ok(("x86_64-apple-darwin", "lib", "dylib")),

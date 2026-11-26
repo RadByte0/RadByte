@@ -43,6 +43,10 @@ fn release_target() -> Result<(&'static str, &'static str), String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => Ok(("x86_64-pc-windows-msvc", "dll")),
         ("windows", "aarch64") => Ok(("aarch64-pc-windows-msvc", "dll")),
+        ("linux", "x86_64") if cfg!(target_env = "musl") => Ok(("x86_64-unknown-linux-musl", "so")),
+        ("linux", "aarch64") if cfg!(target_env = "musl") => {
+            Ok(("aarch64-unknown-linux-musl", "so"))
+        }
         ("linux", "x86_64") => Ok(("x86_64-unknown-linux-gnu", "so")),
         ("linux", "aarch64") => Ok(("aarch64-unknown-linux-gnu", "so")),
         ("macos", "x86_64") => Ok(("x86_64-apple-darwin", "dylib")),
@@ -739,6 +743,8 @@ fn adoptium_os_arch() -> Result<(&'static str, &'static str), String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => Ok(("windows", "x64")),
         ("windows", "aarch64") => Ok(("windows", "aarch64")),
+        ("linux", "x86_64") if cfg!(target_env = "musl") => Ok(("alpine-linux", "x64")),
+        ("linux", "aarch64") if cfg!(target_env = "musl") => Ok(("alpine-linux", "aarch64")),
         ("linux", "x86_64") => Ok(("linux", "x64")),
         ("linux", "aarch64") => Ok(("linux", "aarch64")),
         ("macos", "x86_64") => Ok(("mac", "x64")),
