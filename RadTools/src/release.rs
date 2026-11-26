@@ -79,18 +79,9 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
         ("RadServer", "server"),
         ("RadProxy", "proxy"),
         ("RadLimbo", "limbo"),
-        ("Version libraries", "version"),
-        ("API runtimes", "api"),
     ] {
         text.push_str(&format!("<details>\n<summary>{title}</summary>\n\n"));
-        if service == "version" {
-            text.push_str("**Minecraft 26.3**\n\n");
-        } else if service == "api" {
-            text.push_str(
-                "**RadAPI v1 (optional — auto-installed only when radons are present)**\n\n",
-            );
-        }
-        for (target, exe, _, libext) in TARGETS {
+        for (target, exe, _, _) in TARGETS {
             let os = if target.contains("windows") {
                 "Windows"
             } else if target.contains("linux") {
@@ -103,13 +94,7 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
             } else {
                 "ARM64"
             };
-            let file = if service == "version" {
-                format!("rad-version-26.3-{target}{libext}")
-            } else if service == "api" {
-                format!("rad-api-v1-{target}{libext}")
-            } else {
-                format!("rad-{service}-{target}{exe}")
-            };
+            let file = format!("rad-{service}-{target}{exe}");
             if !assets.join(&file).is_file() {
                 return Err(format!("Missing release asset: {file}"));
             }
