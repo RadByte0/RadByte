@@ -79,6 +79,7 @@ fn main() {
 async fn async_main() {
     let _console_ui = ConsoleUi::start("RadLimbo", env!("CARGO_PKG_VERSION"), "status, stop");
     tracing_subscriber::fmt()
+        .with_target(false)
         .with_writer(make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -43,6 +43,7 @@ async fn shutdown_signal() {
 /// and `versions_dir` (`versions/`). Returns `0` on clean shutdown or non-zero on error.
 pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
     let _ = tracing_subscriber::fmt()
+        .with_target(false)
         .with_writer(rad_core::console_ui::make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

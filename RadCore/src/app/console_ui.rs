@@ -13,12 +13,44 @@ const TUI_LOG_ADDR_ENV: &str = "RADBYTE_TUI_LOG_ADDR";
 const TUI_CMD_ADDR_ENV: &str = "RADBYTE_TUI_CMD_ADDR";
 const MAX_LOG_LINES: usize = 1000;
 
-/// Returns `true` when both stdin and stdout are interactive terminals and TUI is not disabled.
+fn is_truthy_env(name: &str) -> bool {
+    std::env::var(name)
+        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn is_container_or_panel() -> bool {
+    if std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == "--nogui" || arg == "nogui")
+    {
+        return true;
+    }
+    for var in ["CI", "RADBYTE_NO_TUI", "RADBYTE_NOGUI", "NOGUI"] {
+        if is_truthy_env(var) {
+            return true;
+        }
+    }
+    for panel_var in [
+        "P_SERVER_UUID",
+        "PELICAN_SERVER_UUID",
+        "PTERODACTYL_SERVER_UUID",
+        "P_SERVER_LOCATION",
+    ] {
+        if std::env::var_os(panel_var).is_some() {
+            return true;
+        }
+    }
+    #[cfg(unix)]
+    if std::path::Path::new("/.dockerenv").exists() {
+        return true;
+    }
+    false
+}
+
+/// Returns `true` when both stdin and stdout are interactive terminals and not inside a panel/container.
 #[must_use]
 pub fn is_interactive_tty() -> bool {
-    if std::env::var("CI").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        || std::env::var("RADBYTE_NO_TUI").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    {
+    if is_container_or_panel() {
         return false;
     }
     std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
@@ -343,7 +375,7 @@ fn append_pixel_header(out: &mut String, product: &str, version: &str, hint: &st
         ),
         (
             "\x1b[38;2;99;102;241m██╔══██╗\x1b[0m",
-            "\x1b[90mPgUp/PgDn: scroll logs  •  Enter: run command\x1b[0m".to_owned(),
+            "\x1b[90mScroll: Mouse / PgUp / PgDn  •  Enter: run command\x1b[0m".to_owned(),
         ),
         ("\x1b[38;2;139;92;246m██║  ██║\x1b[0m", String::new()),
     ];
@@ -408,10 +440,10 @@ impl ConsoleUi {
             std::env::set_var(TUI_CMD_ADDR_ENV, &cmd_addr);
         }
 
-        // Enter alternate screen buffer (disables outer terminal scrollbar).
+        // Enter alternate screen buffer (disables outer terminal scrollbar) and enable SGR mouse wheel.
         {
             let mut stdout = std::io::stdout().lock();
-            let _ = write!(stdout, "\x1b[?1049h\x1b[2J\x1b[H");
+            let _ = write!(stdout, "\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[2J\x1b[H");
             let _ = stdout.flush();
         }
 
@@ -493,33 +525,41 @@ impl ConsoleUi {
                         let b = byte[0];
                         if in_esc {
                             esc_seq.push(b);
-                            let done =
-                                matches!(b, b'~' | b'A'..=b'Z' | b'a'..=b'z') || esc_seq.len() >= 6;
+                            let done = matches!(b, b'~' | b'A'..=b'Z' | b'a'..=b'z')
+                                || esc_seq.len() >= 24;
                             if done {
                                 in_esc = false;
                                 let mut st = key_state.lock().unwrap();
-                                match esc_seq.as_slice() {
-                                    b"[5~" => {
-                                        st.scroll_from_bottom =
-                                            st.scroll_from_bottom.saturating_add(5);
-                                        st.render();
+                                if esc_seq.starts_with(b"[<64;") {
+                                    st.scroll_from_bottom = st.scroll_from_bottom.saturating_add(3);
+                                    st.render();
+                                } else if esc_seq.starts_with(b"[<65;") {
+                                    st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(3);
+                                    st.render();
+                                } else {
+                                    match esc_seq.as_slice() {
+                                        b"[5~" => {
+                                            st.scroll_from_bottom =
+                                                st.scroll_from_bottom.saturating_add(5);
+                                            st.render();
+                                        }
+                                        b"[6~" => {
+                                            st.scroll_from_bottom =
+                                                st.scroll_from_bottom.saturating_sub(5);
+                                            st.render();
+                                        }
+                                        b"[A" if st.input.is_empty() => {
+                                            st.scroll_from_bottom =
+                                                st.scroll_from_bottom.saturating_add(1);
+                                            st.render();
+                                        }
+                                        b"[B" if st.input.is_empty() => {
+                                            st.scroll_from_bottom =
+                                                st.scroll_from_bottom.saturating_sub(1);
+                                            st.render();
+                                        }
+                                        _ => {}
                                     }
-                                    b"[6~" => {
-                                        st.scroll_from_bottom =
-                                            st.scroll_from_bottom.saturating_sub(5);
-                                        st.render();
-                                    }
-                                    b"[A" if st.input.is_empty() => {
-                                        st.scroll_from_bottom =
-                                            st.scroll_from_bottom.saturating_add(1);
-                                        st.render();
-                                    }
-                                    b"[B" if st.input.is_empty() => {
-                                        st.scroll_from_bottom =
-                                            st.scroll_from_bottom.saturating_sub(1);
-                                        st.render();
-                                    }
-                                    _ => {}
                                 }
                                 esc_seq.clear();
                             }
@@ -597,7 +637,7 @@ impl Drop for ConsoleUi {
                 std::env::remove_var(TUI_CMD_ADDR_ENV);
             }
             let mut stdout = std::io::stdout().lock();
-            let _ = write!(stdout, "\x1b[?25h\x1b[?1049l\x1b[0m");
+            let _ = write!(stdout, "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l\x1b[0m");
             let _ = stdout.flush();
         }
         // Only join background UDP/accept threads; stdin reader may be blocked on ReadConsole.
@@ -655,26 +695,58 @@ pub fn make_log_writer() -> ConsoleLogWriter {
     }
 }
 
+fn compact_log_line(raw: &str) -> String {
+    // Shortens `YYYY-MM-DDTHH:MM:SS.xxxxxxZ` (optionally wrapped in ANSI dim codes) to `[HH:MM:SS]`.
+    if let Some(t_pos) = raw.find('T')
+        && t_pos >= 10
+        && let Some(z_rel) = raw[t_pos..].find('Z')
+        && z_rel >= 9
+    {
+        let date_slice = &raw[t_pos - 10..t_pos];
+        let time_slice = &raw[t_pos + 1..t_pos + 9];
+        if date_slice.as_bytes().get(4) == Some(&b'-')
+            && date_slice.as_bytes().get(7) == Some(&b'-')
+            && time_slice.as_bytes().get(2) == Some(&b':')
+            && time_slice.as_bytes().get(5) == Some(&b':')
+        {
+            let prefix = &raw[..t_pos - 10];
+            let suffix = &raw[t_pos + z_rel + 1..];
+            return format!("{prefix}[{time_slice}]{suffix}");
+        }
+    }
+    raw.to_owned()
+}
+
 impl Write for ConsoleLogWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let (Some(sock), Some(target)) = (&self.sock, &self.target) else {
-            return std::io::stdout().write(data);
-        };
         self.buf.extend_from_slice(data);
         while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            let _ = sock.send_to(&line, target);
+            let text = String::from_utf8_lossy(&line);
+            let compact = compact_log_line(&text);
+            if let (Some(sock), Some(target)) = (&self.sock, &self.target) {
+                let _ = sock.send_to(compact.as_bytes(), target);
+            } else {
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(compact.as_bytes());
+                let _ = stdout.flush();
+            }
         }
         Ok(data.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let (Some(sock), Some(target)) = (&self.sock, &self.target) else {
-            return std::io::stdout().flush();
-        };
         if !self.buf.is_empty() {
-            let _ = sock.send_to(&self.buf, target);
+            let text = String::from_utf8_lossy(&self.buf).into_owned();
             self.buf.clear();
+            let compact = compact_log_line(&text);
+            if let (Some(sock), Some(target)) = (&self.sock, &self.target) {
+                let _ = sock.send_to(compact.as_bytes(), target);
+            } else {
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(compact.as_bytes());
+                let _ = stdout.flush();
+            }
         }
         Ok(())
     }

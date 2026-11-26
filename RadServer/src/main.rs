@@ -41,6 +41,7 @@ fn cstr_bytes_to_str(buf: &[u8]) -> &str {
 
 fn main() {
     tracing_subscriber::fmt()
+        .with_target(false)
         .with_writer(make_log_writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
