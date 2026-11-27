@@ -925,7 +925,7 @@ pub fn make_log_writer() -> ConsoleLogWriter {
 }
 
 fn compact_log_line(raw: &str) -> String {
-    // Shortens `YYYY-MM-DDTHH:MM:SS.xxxxxxZ` (optionally wrapped in ANSI dim codes) to `[HH:MM:SS]`.
+    // Shortens `YYYY-MM-DDTHH:MM:SS.xxxxxxZ  INFO ...` into `[HH:MM:SS INFO] ...`.
     if let Some(t_pos) = raw.find('T')
         && t_pos >= 10
         && let Some(z_rel) = raw[t_pos..].find('Z')
@@ -939,8 +939,10 @@ fn compact_log_line(raw: &str) -> String {
             && time_slice.as_bytes().get(5) == Some(&b':')
         {
             let prefix = &raw[..t_pos - 10];
-            let suffix = &raw[t_pos + z_rel + 1..];
-            return format!("{prefix}[{time_slice}]{suffix}");
+            let suffix = raw[t_pos + z_rel + 1..].trim_start_matches(' ');
+            // Collapse `tracing`'s padded ` INFO` / ` WARN` / `ERROR` spacing.
+            let cleaned_suffix = suffix.replace("\x1b[0m  ", "\x1b[0m ").replace("  ", " ");
+            return format!("{prefix}[{time_slice}]\x1b[0m {cleaned_suffix}");
         }
     }
     raw.to_owned()
