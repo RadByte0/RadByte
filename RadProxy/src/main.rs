@@ -24,15 +24,6 @@ use crate::proxy::auth::ProxyKeypair;
 use crate::proxy::{ProxyState, handle_connection};
 use crate::radon::RadonManager;
 
-const PROXY_BANNER: &str = r"
-  ____           _ ____
- |  _ \ __ _  __| |  _ \ _ __ _____  ___   _
- | |_) / _` |/ _` | |_) | '__/ _ \ \/ / | | |
- |  _ < (_| | (_| |  __/| | | (_) >  <| |_| |
- |_| \_\__,_|\__,_|_|   |_|  \___/_/\_\\__, |
-                                       |___/
-";
-
 fn main() {
     let _console_ui = ConsoleUi::start(
         "RadProxy",
@@ -48,7 +39,7 @@ fn main() {
         )
         .init();
 
-    print_startup_banner("RadProxy", env!("CARGO_PKG_VERSION"), PROXY_BANNER);
+    print_startup_banner("RadProxy", env!("CARGO_PKG_VERSION"), "");
 
     for dir in ["radons", "radonfigs"] {
         if let Err(e) = std::fs::create_dir_all(dir) {

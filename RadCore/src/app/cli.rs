@@ -9,20 +9,22 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-/// Prints the supplied artwork followed by the product and protocol versions.
-pub fn print_startup_banner(product_name: &str, crate_version: &str, ascii_art: &str) {
+/// Prints the 6-line ANSI Shadow `RADBYTE` logo followed by the product and protocol versions.
+pub fn print_startup_banner(product_name: &str, crate_version: &str, _ascii_art: &str) {
     enable_ansi_colors();
-    if std::env::var_os("RADBYTE_ANTIGRAVITY_CLI").is_some_and(|v| v == "1") {
+    if std::env::var_os("RADBYTE_ANTIGRAVITY_CLI").is_some_and(|v| v == "1")
+        || crate::console_ui::is_interactive_tty()
+    {
         return;
     }
-    let version_line = format!(
-        "\x1b[38;2;232;125;13m{ascii_art}\x1b[0m\n  \x1b[1;37m{}\x1b[0m \x1b[38;2;232;125;13mv{}\x1b[0m \x1b[90m|\x1b[0m Minecraft {} \x1b[90m(protocol {})\x1b[0m\n",
-        product_name,
-        crate_version,
+    let mut out = String::with_capacity(1024);
+    crate::console_ui::append_radbyte_logo(&mut out);
+    out.push_str(&format!(
+        "  \x1b[1;37m{product_name}\x1b[0m \x1b[38;2;232;125;13mv{crate_version}\x1b[0m \x1b[90m|\x1b[0m Minecraft {} \x1b[90m(protocol {})\x1b[0m\n",
         crate::MINECRAFT_VERSION,
         crate::PROTOCOL_VERSION
-    );
-    println!("{version_line}");
+    ));
+    println!("{out}");
 }
 
 /// Enables ANSI escape sequence rendering on Windows consoles.

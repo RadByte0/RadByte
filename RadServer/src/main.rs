@@ -23,14 +23,6 @@ use tracing::{error, info};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-const SERVER_BANNER: &str = r"
-  ____           _ ____
- |  _ \ __ _  __| / ___|  ___ _ ____   _____ _ __
- | |_) / _` |/ _` \___ \ / _ \ '__\ \ / / _ \ '__|
- |  _ < (_| | (_| |___) |  __/ |   \ V /  __/ |
- |_| \_\__,_|\__,_|____/ \___|_|    \_/ \___|_|
-";
-
 type FnAbiVersion = unsafe extern "C" fn() -> u32;
 type FnVersionInfo = unsafe extern "C" fn(*mut RadVersionInfo) -> i32;
 type FnRunServer = unsafe extern "C" fn(*const RadServerStartOptions) -> i32;
@@ -50,7 +42,7 @@ fn main() {
         )
         .init();
 
-    print_startup_banner("RadServer", env!("CARGO_PKG_VERSION"), SERVER_BANNER);
+    print_startup_banner("RadServer", env!("CARGO_PKG_VERSION"), "");
 
     let server_cfg_path = resolve_config_path("server.properties");
     let work_dir = server_cfg_path

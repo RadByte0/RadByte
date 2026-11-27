@@ -26,14 +26,6 @@ use crate::net::{LimboState, handle_connection};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-const LIMBO_BANNER: &str = r"
-  ____           _ _     _           _
- |  _ \ __ _  __| | |   (_)_ __ ___ | |__   ___
- | |_) / _` |/ _` | |   | | '_ ` _ \| '_ \ / _ \
- |  _ < (_| | (_| | |___| | | | | | | |_) | (_) |
- |_| \_\__,_|\__,_|_____|_|_| |_| |_|_.__/ \___/
-";
-
 struct LimboPackageProvider(Arc<LoadedVersionPackage>);
 
 impl RegistryProvider for LimboPackageProvider {
@@ -90,7 +82,7 @@ async fn async_main() {
         )
         .init();
 
-    print_startup_banner("RadLimbo", env!("CARGO_PKG_VERSION"), LIMBO_BANNER);
+    print_startup_banner("RadLimbo", env!("CARGO_PKG_VERSION"), "");
 
     let cfg_path = resolve_config_path("limbo.properties");
     let rad_cfg_path = rad_core::auto_update::rad_properties_path_for(&cfg_path);
