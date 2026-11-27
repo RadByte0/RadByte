@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::auto_update::{
     AutoUpdateSettings, MAX_AUTO_UPDATE_INTERVAL_MINUTES, MIN_AUTO_UPDATE_INTERVAL_MINUTES,
-    load_auto_update_settings, save_auto_update_settings,
+    load_auto_update_settings, rad_properties_path_for, save_auto_update_settings,
 };
 use crate::console_ui::{RawTerminalGuard, append_radbyte_logo, is_interactive_tty, terminal_size};
 
@@ -274,7 +274,8 @@ pub fn ensure_proxy_setup(cfg_path: &Path) -> Result<(), String> {
     let mut backend = "127.0.0.1:25567".to_owned();
     let mut fwd_idx = 0usize;
     let mut fwd_open = false;
-    let mut auto_menu = AutoUpdateMenu::load(cfg_path, true, false, 17);
+    let rad_cfg_path = rad_properties_path_for(cfg_path);
+    let mut auto_menu = AutoUpdateMenu::load(&rad_cfg_path, true, false, 17);
     let mut focused = 0usize; // 0=ip, 1=port, 2=backend, 3=fwd, 4=auto_update, 5=save
     let mut editing: Option<usize> = None;
 
@@ -449,7 +450,8 @@ pub fn ensure_limbo_setup(cfg_path: &Path) -> Result<(), String> {
     let mut port = "25566".to_owned();
     let mut fwd_idx = 0usize;
     let mut fwd_open = false;
-    let mut auto_menu = AutoUpdateMenu::load(cfg_path, false, false, 17);
+    let rad_cfg_path = rad_properties_path_for(cfg_path);
+    let mut auto_menu = AutoUpdateMenu::load(&rad_cfg_path, false, false, 17);
     let mut focused = 0usize; // 0=ip, 1=port, 2=fwd, 3=auto_update, 4=save
     let mut editing: Option<usize> = None;
 
@@ -622,7 +624,8 @@ fn apply_headless_env_defaults(
     let backend =
         default_backend.map(|d| std::env::var("BACKEND_ADDR").unwrap_or_else(|_| d.to_owned()));
     let fwd = std::env::var("FORWARDING_MODE").unwrap_or_else(|_| "none".to_owned());
-    let auto_settings = load_auto_update_settings(cfg_path);
+    let rad_cfg_path = rad_properties_path_for(cfg_path);
+    let auto_settings = load_auto_update_settings(&rad_cfg_path);
     write_initial_properties(
         cfg_path,
         &ip,
@@ -653,7 +656,8 @@ fn write_initial_properties(
         out.push_str(&format!("backend-addr={b}\n"));
     }
     std::fs::write(cfg_path, out).map_err(|e| e.to_string())?;
-    save_auto_update_settings(cfg_path, auto_settings).map_err(|e| e.to_string())
+    let rad_cfg_path = rad_properties_path_for(cfg_path);
+    save_auto_update_settings(&rad_cfg_path, auto_settings).map_err(|e| e.to_string())
 }
 
 struct SetupScreen(Option<RawTerminalGuard>);

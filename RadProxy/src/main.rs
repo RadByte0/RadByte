@@ -57,7 +57,13 @@ fn main() {
         }
     }
 
-    let cfg_path = resolve_config_path("rad.properties");
+    let cfg_path = resolve_config_path("proxy.properties");
+    let rad_cfg_path = rad_core::auto_update::rad_properties_path_for(&cfg_path);
+    rad_core::auto_update::ensure_rad_and_migrate_legacy(
+        &cfg_path,
+        &rad_cfg_path,
+        &["server-port=", "backend-addr="],
+    );
     if let Err(err) = rad_core::setup_ui::ensure_proxy_setup(&cfg_path) {
         error!(%err, "proxy setup cancelled");
         exit_with_pause(1);
@@ -66,8 +72,8 @@ fn main() {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
-    auto_update::run_startup_auto_update(&cfg_path, work_dir);
-    auto_update::spawn_background_watcher(cfg_path.clone());
+    auto_update::run_startup_auto_update(&rad_cfg_path, work_dir);
+    auto_update::spawn_background_watcher(rad_cfg_path.clone());
     let config = match ProxyConfig::load_or_create(&cfg_path) {
         Ok(cfg) => cfg,
         Err(err) => {

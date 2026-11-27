@@ -343,6 +343,38 @@ pub fn save_auto_update_settings(
     )
 }
 
+/// Resolves `rad.properties` alongside `service_cfg_path` (or returns `service_cfg_path` if it already targets `rad.properties`).
+#[must_use]
+pub fn rad_properties_path_for(service_cfg_path: &Path) -> std::path::PathBuf {
+    if service_cfg_path.file_name().and_then(|n| n.to_str()) == Some("rad.properties") {
+        service_cfg_path.to_path_buf()
+    } else {
+        service_cfg_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join("rad.properties")
+    }
+}
+
+/// Ensures `rad.properties` exists with default auto-update settings; if `service_cfg_path` does not exist
+/// yet and `rad.properties` contains legacy service keys (`markers`), copies them to `service_cfg_path`.
+pub fn ensure_rad_and_migrate_legacy(
+    service_cfg_path: &Path,
+    rad_cfg_path: &Path,
+    legacy_markers: &[&str],
+) {
+    if !rad_cfg_path.exists() {
+        let _ = save_auto_update_settings(rad_cfg_path, &AutoUpdateSettings::default());
+    } else if !service_cfg_path.exists()
+        && service_cfg_path != rad_cfg_path
+        && let Ok(legacy) = std::fs::read_to_string(rad_cfg_path)
+        && legacy_markers.iter().any(|m| legacy.contains(m))
+    {
+        let _ = std::fs::write(service_cfg_path, legacy);
+    }
+}
+
 /// Persists `auto-update=true|false` in `cfg_path` (`rad.properties`), preserving existing lines.
 pub fn set_auto_update_setting(cfg_path: &Path, enabled: bool) -> std::io::Result<()> {
     let value = if enabled { "true" } else { "false" }.to_owned();

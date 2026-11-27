@@ -57,24 +57,12 @@ fn main() {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let rad_cfg_path =
-        if server_cfg_path.file_name().and_then(|n| n.to_str()) == Some("rad.properties") {
-            server_cfg_path.clone()
-        } else {
-            work_dir.join("rad.properties")
-        };
-    if !rad_cfg_path.exists() {
-        let _ = rad_core::auto_update::save_auto_update_settings(
-            &rad_cfg_path,
-            &rad_core::auto_update::AutoUpdateSettings::default(),
-        );
-    } else if !server_cfg_path.exists()
-        && server_cfg_path.file_name().and_then(|n| n.to_str()) == Some("server.properties")
-        && let Ok(legacy) = std::fs::read_to_string(&rad_cfg_path)
-        && (legacy.contains("server-port=") || legacy.contains("motd="))
-    {
-        let _ = std::fs::write(&server_cfg_path, legacy);
-    }
+    let rad_cfg_path = rad_core::auto_update::rad_properties_path_for(&server_cfg_path);
+    rad_core::auto_update::ensure_rad_and_migrate_legacy(
+        &server_cfg_path,
+        &rad_cfg_path,
+        &["server-port=", "motd="],
+    );
     let versions_dir = resolve_versions_dir(&server_cfg_path);
 
     if let Err(e) = version_install::ensure_installed_headless(work_dir, &versions_dir) {
