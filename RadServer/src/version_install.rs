@@ -419,6 +419,304 @@ fn filter_console_releases(
 }
 
 fn prompt_console_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, String> {
+    if rad_core::console_ui::is_interactive_tty() {
+        return prompt_interactive_tui_setup(work_dir);
+    }
+    prompt_console_setup_plain(work_dir)
+}
+
+fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, String> {
+    let all = match fetch_available_releases() {
+        Ok(list) if !list.is_empty() => list,
+        _ => vec![AvailableRelease {
+            tag: option_env!("RADBYTE_RELEASE_TAG")
+                .filter(|s| !s.is_empty())
+                .unwrap_or("latest")
+                .to_owned(),
+            game_version: "26.3".to_owned(),
+        }],
+    };
+    let cfg_path = work_dir.join("rad.properties");
+    let eula_path = work_dir.join("eula.txt");
+    let mut auto_update = rad_core::auto_update::is_auto_update_enabled(&cfg_path);
+    let mut eula_ok =
+        is_eula_file_accepted(&eula_path) || std::env::args().skip(1).any(|a| a == "--accept-eula");
+    let mut show_older = false;
+    let mut dropdown_open = false;
+    let mut editing_search = false;
+    let mut editing_local = false;
+    let mut query = String::new();
+    let mut local_path = String::new();
+    let mut selected_rel_idx = 0usize;
+    let mut focused_row = 0usize; // 0=version dropdown, 1=older toggle, 2=auto-update, 3=EULA, 4=local folder, 5=Install&Start
+    let mut notice = String::new();
+
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = write!(stdout, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H");
+        let _ = stdout.flush();
+    }
+    struct SetupScreenGuard(Option<rad_core::console_ui::RawTerminalGuard>);
+    impl Drop for SetupScreenGuard {
+        fn drop(&mut self) {
+            drop(self.0.take());
+            let mut stdout = std::io::stdout().lock();
+            let _ = write!(stdout, "\x1b[?25h\x1b[?1049l\x1b[0m");
+            let _ = stdout.flush();
+        }
+    }
+    let _guard = SetupScreenGuard(Some(rad_core::console_ui::RawTerminalGuard::enter()));
+    let mut stdin = std::io::stdin();
+    let mut byte = [0u8; 1];
+    let mut esc_seq = Vec::new();
+    let mut in_esc = false;
+
+    loop {
+        let filtered = filter_console_releases(&all, &query, show_older);
+        if selected_rel_idx >= filtered.len() {
+            selected_rel_idx = 0;
+        }
+        let (cols, _) = rad_core::console_ui::terminal_size();
+        let width = usize::from(cols);
+        let divider = "─".repeat(width);
+        let selected_label = filtered.get(selected_rel_idx).map_or_else(
+            || "Minecraft 26.3 (latest)".to_owned(),
+            |r| format!("Minecraft {}  ({})", r.game_version, r.tag),
+        );
+
+        let mut out = String::with_capacity(2048);
+        out.push_str("\x1b[H");
+        out.push_str("\x1b[2K  \x1b[38;2;245;158;11m██████╗ \x1b[0m  \x1b[1;37mRadServer Setup\x1b[0m \x1b[38;2;232;125;13mv");
+        out.push_str(env!("CARGO_PKG_VERSION"));
+        out.push_str("\x1b[0m\n");
+        out.push_str("\x1b[2K  \x1b[38;2;232;125;13m██╔══██╗\x1b[0m  \x1b[90mFirst-Run Configuration\x1b[0m\n");
+        out.push_str("\x1b[2K  \x1b[38;2;232;125;13m██████╔╝\x1b[0m  \x1b[90m↑/↓ Navigate  •  Space/Enter Toggle  •  / Search  •  Esc Quit\x1b[0m\n");
+        out.push_str(&format!("\x1b[2K\x1b[38;2;56;56;56m{divider}\x1b[0m\n"));
+
+        let row_marker = |idx: usize| {
+            if focused_row == idx {
+                "\x1b[38;2;232;125;13m›\x1b[0m"
+            } else {
+                " "
+            }
+        };
+        let arrow = if dropdown_open { "▲" } else { "▼" };
+        out.push_str(&format!(
+            "\x1b[2K  {} \x1b[1;37mVersion:\x1b[0m               [\x1b[38;2;232;125;13m{arrow}\x1b[0m] {selected_label}\n",
+            row_marker(0)
+        ));
+
+        if dropdown_open {
+            let search_hint = if editing_search {
+                format!("\x1b[38;2;232;125;13mSearch: {query}_\x1b[0m")
+            } else if query.is_empty() {
+                "\x1b[90m(press / to search)\x1b[0m".to_owned()
+            } else {
+                format!("\x1b[90mFilter: {query} (press / to edit)\x1b[0m")
+            };
+            out.push_str(&format!("\x1b[2K       {search_hint}\n"));
+            if filtered.is_empty() {
+                out.push_str("\x1b[2K       \x1b[90m(no matching releases)\x1b[0m\n");
+            } else {
+                let win_start = selected_rel_idx.saturating_sub(4);
+                for (i, rel) in filtered.iter().enumerate().skip(win_start).take(7) {
+                    let mark = if i == selected_rel_idx {
+                        "\x1b[38;2;232;125;13m●\x1b[0m"
+                    } else {
+                        "\x1b[90m○\x1b[0m"
+                    };
+                    out.push_str(&format!(
+                        "\x1b[2K       {mark} Minecraft {}  \x1b[90m({})\x1b[0m\n",
+                        rel.game_version, rel.tag
+                    ));
+                }
+            }
+        }
+
+        let older_box = if show_older {
+            "\x1b[38;2;232;125;13m[x]\x1b[0m"
+        } else {
+            "\x1b[90m[ ]\x1b[0m"
+        };
+        let auto_box = if auto_update {
+            "\x1b[38;2;232;125;13m[x]\x1b[0m"
+        } else {
+            "\x1b[90m[ ]\x1b[0m"
+        };
+        let eula_box = if eula_ok {
+            "\x1b[32m[x]\x1b[0m"
+        } else {
+            "\x1b[90m[ ]\x1b[0m"
+        };
+        let local_disp = if editing_local {
+            format!("\x1b[38;2;232;125;13m{local_path}_\x1b[0m")
+        } else if local_path.is_empty() {
+            "\x1b[90m(auto-install from Mojang)\x1b[0m".to_owned()
+        } else {
+            local_path.clone()
+        };
+
+        out.push_str(&format!(
+            "\x1b[2K  {} \x1b[1;37mShow older releases:\x1b[0m   {older_box}\n",
+            row_marker(1)
+        ));
+        out.push_str(&format!(
+            "\x1b[2K  {} \x1b[1;37mAuto-update all:\x1b[0m       {auto_box} \x1b[90m(launcher, versions, API)\x1b[0m\n",
+            row_marker(2)
+        ));
+        out.push_str(&format!(
+            "\x1b[2K  {} \x1b[1;37mMinecraft EULA:\x1b[0m        {eula_box} \x1b[90m(aka.ms/MinecraftEULA)\x1b[0m\n",
+            row_marker(3)
+        ));
+        out.push_str(&format!(
+            "\x1b[2K  {} \x1b[1;37mLocal data folder:\x1b[0m     {local_disp}\n",
+            row_marker(4)
+        ));
+        out.push_str("\x1b[2K\n");
+        let btn_style = if focused_row == 5 {
+            "\x1b[48;2;232;125;13m\x1b[1;30m  Install & Start Server  \x1b[0m"
+        } else {
+            "\x1b[38;2;232;125;13m[ Install & Start Server ]\x1b[0m"
+        };
+        out.push_str(&format!("\x1b[2K  {} {btn_style}\n", row_marker(5)));
+        if !notice.is_empty() {
+            out.push_str(&format!(
+                "\x1b[2K  \x1b[38;2;232;125;13m! {notice}\x1b[0m\n"
+            ));
+        }
+        out.push_str("\x1b[J");
+
+        {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(out.as_bytes());
+            let _ = stdout.flush();
+        }
+
+        if stdin.read(&mut byte).unwrap_or(0) == 0 {
+            break;
+        }
+        let b = byte[0];
+        if in_esc {
+            esc_seq.push(b);
+            let done = matches!(b, b'~' | b'A'..=b'Z' | b'a'..=b'z') || esc_seq.len() >= 12;
+            if done {
+                in_esc = false;
+                match esc_seq.as_slice() {
+                    b"[A" => {
+                        editing_search = false;
+                        editing_local = false;
+                        if dropdown_open && focused_row == 0 {
+                            selected_rel_idx = selected_rel_idx.saturating_sub(1);
+                        } else {
+                            focused_row = focused_row.saturating_sub(1);
+                        }
+                    }
+                    b"[B" => {
+                        editing_search = false;
+                        editing_local = false;
+                        if dropdown_open
+                            && focused_row == 0
+                            && selected_rel_idx + 1 < filtered.len()
+                        {
+                            selected_rel_idx += 1;
+                        } else if focused_row < 5 {
+                            focused_row += 1;
+                        }
+                    }
+                    b"[C" if focused_row == 0 => dropdown_open = true,
+                    b"[D" if focused_row == 0 => dropdown_open = false,
+                    _ => {}
+                }
+                esc_seq.clear();
+            }
+            continue;
+        }
+
+        if editing_search {
+            match b {
+                0x1b => editing_search = false,
+                b'\r' | b'\n' => editing_search = false,
+                0x08 | 0x7f => {
+                    query.pop();
+                    selected_rel_idx = 0;
+                }
+                c if (0x20..0x7f).contains(&c) => {
+                    query.push(c as char);
+                    selected_rel_idx = 0;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if editing_local {
+            match b {
+                0x1b | b'\r' | b'\n' => editing_local = false,
+                0x08 | 0x7f => {
+                    local_path.pop();
+                }
+                c if (0x20..0x7f).contains(&c) => {
+                    local_path.push(c as char);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        match b {
+            0x1b => {
+                in_esc = true;
+                esc_seq.clear();
+            }
+            0x03 | b'q' | b'Q' => return Err("Setup cancelled by user".into()),
+            b'/' => {
+                focused_row = 0;
+                dropdown_open = true;
+                editing_search = true;
+            }
+            b'\t' => focused_row = (focused_row + 1) % 6,
+            b' ' | b'\r' | b'\n' => {
+                notice.clear();
+                match focused_row {
+                    0 => dropdown_open = !dropdown_open,
+                    1 => show_older = !show_older,
+                    2 => {
+                        auto_update = !auto_update;
+                        let _ =
+                            rad_core::auto_update::set_auto_update_setting(&cfg_path, auto_update);
+                    }
+                    3 => eula_ok = !eula_ok,
+                    4 => editing_local = true,
+                    5 => {
+                        let _ =
+                            rad_core::auto_update::set_auto_update_setting(&cfg_path, auto_update);
+                        let tag = filtered
+                            .get(selected_rel_idx)
+                            .map(|r| r.tag.clone())
+                            .filter(|t| t != "latest");
+                        if !local_path.trim().is_empty() {
+                            return Ok(ConsoleSetupChoice::Local {
+                                path: local_path.trim().trim_matches('"').to_owned(),
+                                tag,
+                            });
+                        }
+                        if !eula_ok {
+                            notice = "Accept the Minecraft EULA first (Space on EULA row).".into();
+                            focused_row = 3;
+                            continue;
+                        }
+                        let _ = write_eula_file(&eula_path, true);
+                        return Ok(ConsoleSetupChoice::Mojang(tag));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("Setup cancelled".into())
+}
+
+fn prompt_console_setup_plain(work_dir: &Path) -> Result<ConsoleSetupChoice, String> {
     println!(
         "  \x1b[38;2;232;125;13m[FIRST-RUN SETUP]\x1b[0m Fetching available RadByte releases..."
     );

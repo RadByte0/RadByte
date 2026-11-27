@@ -131,7 +131,8 @@ pub fn terminal_size() -> (u16, u16) {
     (80, 24)
 }
 
-struct RawTerminalGuard {
+/// Cross-platform RAII guard for raw/non-canonical terminal input mode.
+pub struct RawTerminalGuard {
     #[cfg(windows)]
     stdin_handle: isize,
     #[cfg(windows)]
@@ -143,7 +144,9 @@ struct RawTerminalGuard {
 }
 
 impl RawTerminalGuard {
-    fn enter() -> Self {
+    /// Enters raw/non-canonical input mode and restores the original mode on drop.
+    #[must_use]
+    pub fn enter() -> Self {
         #[cfg(windows)]
         {
             #[link(name = "kernel32")]
