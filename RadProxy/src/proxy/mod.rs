@@ -35,8 +35,9 @@ use rad_core::packet::login::{
     LoginPluginRequest, LoginPluginResponse, LoginStart, LoginSuccess, SetCompression,
 };
 use rad_core::packet::play::{
-    ChatCommand, ConfigurationAcknowledged, DeclareCommands, PlayClientboundPluginMessage,
-    PlayDisconnect, PlayServerboundPluginMessage, StartConfiguration, SystemChatMessage,
+    ChatCommand, ConfigurationAcknowledged, DeclareCommands, KeepAliveClientbound, MovePlayerPos,
+    MovePlayerPosRot, PlayClientboundPluginMessage, PlayDisconnect, PlayServerboundPluginMessage,
+    StartConfiguration, SynchronizePlayerPosition, SystemChatMessage,
 };
 use rad_core::packet::status::{
     PingRequest, PlayerSample, PongResponse, StatusPayload, StatusPlayers, StatusRequest,

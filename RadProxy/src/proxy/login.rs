@@ -135,15 +135,22 @@ pub(super) async fn handle_login(
     let mut pending_chat: Option<String> = None;
     let mut client_state = WireState::Login;
     let mut client_compression: Option<CompressionConfig> = None;
+    let mut last_pos = PlayerHoldPos::default();
+    let mut preconnected_backend: Option<TcpStream> = None;
 
     loop {
-        let Some((connected_name, connected_addr, mut backend)) = connect_with_fallback(
-            &identity.username,
-            current_server.as_deref(),
-            backend_addr,
-            cfg,
-        )
-        .await
+        let Some((connected_name, connected_addr, mut backend)) =
+            (if let Some(stream) = preconnected_backend.take() {
+                Some((current_server.clone(), backend_addr, stream))
+            } else {
+                connect_with_fallback(
+                    &identity.username,
+                    current_server.as_deref(),
+                    backend_addr,
+                    cfg,
+                )
+                .await
+            })
         else {
             warn!(%peer_addr, %backend_addr, "failed to connect to backend and all fallback servers");
             send_disconnect_for_state(
@@ -216,6 +223,7 @@ pub(super) async fn handle_login(
             &identity.username,
             current_server.as_deref(),
             &mut control_rx,
+            &mut last_pos,
             cfg,
         )
         .await;
@@ -236,6 +244,39 @@ pub(super) async fn handle_login(
                 client_state = WireState::Configuration;
             }
             ProxyExit::BackendClosed { kick_reason } => {
+                if client_state == WireState::Play
+                    && cfg.seamless_restart
+                    && is_restart_kick_reason(kick_reason.as_deref())
+                {
+                    info!(
+                        %peer_addr,
+                        username = %identity.username,
+                        %backend_addr,
+                        timeout_secs = cfg.seamless_restart_timeout_secs,
+                        "backend closed during play; holding player for seamless restart"
+                    );
+                    match hold_player_during_restart(
+                        &mut client,
+                        &mut read_buf,
+                        client_compression,
+                        backend_addr,
+                        last_pos,
+                        cfg,
+                    )
+                    .await
+                    {
+                        HoldResult::Reconnected(stream) => {
+                            preconnected_backend = Some(stream);
+                            client_state = WireState::Configuration;
+                            pending_chat = Some("Reconnected to restarted server.".to_owned());
+                            continue;
+                        }
+                        HoldResult::ClientClosed => break,
+                        HoldResult::Timeout => {
+                            warn!(%peer_addr, username = %identity.username, %backend_addr, "seamless restart timed out");
+                        }
+                    }
+                }
                 if let Some((fb_name, fb_addr)) = find_fallback_server(
                     &identity.username,
                     current_server.as_deref(),
@@ -296,6 +337,175 @@ pub(super) async fn handle_login(
     state.online_players.fetch_sub(1, Ordering::Relaxed);
     if cfg.log_player_connections {
         info!(%peer_addr, username = %identity.username, "player disconnected");
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct PlayerHoldPos {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub valid: bool,
+}
+
+enum HoldResult {
+    Reconnected(TcpStream),
+    Timeout,
+    ClientClosed,
+}
+
+fn is_restart_kick_reason(reason: Option<&str>) -> bool {
+    let Some(r) = reason else {
+        return true;
+    };
+    let lower = r.to_ascii_lowercase();
+    if lower.contains("ban") || lower.contains("whitelist") || lower.contains("full") {
+        return false;
+    }
+    lower.contains("restart")
+        || lower.contains("shutting down")
+        || lower.contains("server closed")
+        || lower.contains("closed")
+        || lower.contains("updating")
+        || lower.contains("maintenance")
+}
+
+async fn send_hold_chat(
+    client: &mut EncryptedStream,
+    compression: Option<CompressionConfig>,
+    text: &str,
+    overlay: bool,
+) -> Result<()> {
+    let pkt = SystemChatMessage {
+        content: NbtTag::String(text.to_owned()),
+        overlay,
+    };
+    let mut out = BytesMut::new();
+    encode_packet_with_compression(&pkt, &mut out, compression.map(|c| c.threshold))?;
+    client.write_all(&out).await?;
+    Ok(())
+}
+
+async fn send_freeze_position(
+    client: &mut EncryptedStream,
+    compression: Option<CompressionConfig>,
+    pos: PlayerHoldPos,
+    teleport_id: i32,
+) -> Result<()> {
+    if !pos.valid {
+        return Ok(());
+    }
+    let pkt = SynchronizePlayerPosition {
+        teleport_id: VarInt(teleport_id),
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        vx: 0.0,
+        vy: 0.0,
+        vz: 0.0,
+        yaw: pos.yaw,
+        pitch: pos.pitch,
+        flags: 0,
+    };
+    let mut out = BytesMut::new();
+    encode_packet_with_compression(&pkt, &mut out, compression.map(|c| c.threshold))?;
+    client.write_all(&out).await?;
+    Ok(())
+}
+
+async fn hold_player_during_restart(
+    client: &mut EncryptedStream,
+    read_buf: &mut BytesMut,
+    client_compression: Option<CompressionConfig>,
+    backend_addr: SocketAddr,
+    last_pos: PlayerHoldPos,
+    cfg: &ProxyConfig,
+) -> HoldResult {
+    if send_hold_chat(
+        client,
+        client_compression,
+        &cfg.seamless_restart_message,
+        false,
+    )
+    .await
+    .is_err()
+    {
+        return HoldResult::ClientClosed;
+    }
+    let mut tp_id = 900_000i32;
+    if cfg.seamless_restart_freeze
+        && send_freeze_position(client, client_compression, last_pos, tp_id)
+            .await
+            .is_err()
+    {
+        return HoldResult::ClientClosed;
+    }
+
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(cfg.seamless_restart_timeout_secs);
+    let mut poll_tick = tokio::time::interval(Duration::from_millis(cfg.seamless_restart_poll_ms));
+    poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut keepalive_tick = tokio::time::interval(Duration::from_secs(2));
+    keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ka_id = 1i64;
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return HoldResult::Timeout;
+        }
+        tokio::select! {
+            _ = poll_tick.tick() => {
+                if let Ok(Ok(probe)) = tokio::time::timeout(
+                    Duration::from_millis(400),
+                    TcpStream::connect(backend_addr),
+                ).await {
+                    if begin_server_switch(client, read_buf, client_compression, cfg).await.is_ok() {
+                        return HoldResult::Reconnected(probe);
+                    }
+                    return HoldResult::ClientClosed;
+                }
+            }
+            _ = keepalive_tick.tick() => {
+                ka_id = ka_id.wrapping_add(1);
+                let mut out = BytesMut::new();
+                if encode_packet_with_compression(
+                    &KeepAliveClientbound { id: ka_id },
+                    &mut out,
+                    client_compression.map(|c| c.threshold),
+                ).is_err() || client.write_all(&out).await.is_err() {
+                    return HoldResult::ClientClosed;
+                }
+                let _ = send_hold_chat(client, client_compression, &cfg.seamless_restart_message, true).await;
+            }
+            res = client.read_buf(read_buf) => {
+                match res {
+                    Ok(0) | Err(_) => return HoldResult::ClientClosed,
+                    Ok(_) => {
+                        let mut consumed = 0usize;
+                        while let FramePeek::Ready(rel_end) = peek_frame_status(&read_buf[consumed..], cfg.max_packet_size) {
+                            let frame_end = consumed + rel_end;
+                            if let Ok(pkt) = decode_raw_frame_slice(
+                                &read_buf[consumed..frame_end],
+                                cfg.max_packet_size,
+                                client_compression,
+                            ) && cfg.seamless_restart_freeze
+                                && last_pos.valid
+                                && (pkt.id == MovePlayerPos::ID || pkt.id == MovePlayerPosRot::ID)
+                            {
+                                tp_id = tp_id.wrapping_add(1);
+                                if send_freeze_position(client, client_compression, last_pos, tp_id).await.is_err() {
+                                    return HoldResult::ClientClosed;
+                                }
+                            }
+                            consumed = frame_end;
+                        }
+                        read_buf.advance(consumed);
+                    }
+                }
+            }
+        }
     }
 }
 

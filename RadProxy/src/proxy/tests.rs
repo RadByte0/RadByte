@@ -47,6 +47,11 @@ fn test_config(backend_addr: Option<SocketAddr>, forwarding_mode: ForwardingMode
         server_groups: HashMap::new(),
         bungeecord_messaging: true,
         proxy_brand: Some("RadProxy".into()),
+        seamless_restart: false,
+        seamless_restart_timeout_secs: 5,
+        seamless_restart_poll_ms: 100,
+        seamless_restart_freeze: true,
+        seamless_restart_message: "Server is restarting, please wait...".into(),
     }
 }
 
@@ -1470,4 +1475,288 @@ lobby = "127.0.0.1:25566"
     assert!(status.json.contains("Reloaded Proxy MOTD"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn e2e_seamless_restart_freezes_player_and_reconnects() {
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+    let backend_task = tokio::spawn(async move {
+        // First server instance: accept player, enter Play, send position, then simulate restart.
+        let (mut srv1, _) = backend_listener.accept().await.unwrap();
+        let mut s_buf = BytesMut::new();
+        let _hs: Handshake = read_next_frame(&mut srv1, &mut s_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        let ls: LoginStart = read_next_frame(&mut srv1, &mut s_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+
+        let mut out = BytesMut::new();
+        encode_packet(
+            &LoginSuccess {
+                uuid: ls.player_uuid,
+                username: ls.username.clone(),
+                properties: Vec::new(),
+                session_id: Uuid::nil(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        srv1.write_all(&out).await.unwrap();
+        let _ack: LoginAcknowledged = read_next_frame(&mut srv1, &mut s_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+
+        out.clear();
+        encode_packet(&FinishConfiguration, &mut out).unwrap();
+        srv1.write_all(&out).await.unwrap();
+        let _f_ack: AcknowledgeFinishConfiguration = read_next_frame(&mut srv1, &mut s_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+
+        out.clear();
+        encode_packet(
+            &SynchronizePlayerPosition {
+                teleport_id: VarInt(1),
+                x: 10.5,
+                y: 64.0,
+                z: -3.5,
+                vx: 0.0,
+                vy: 0.0,
+                vz: 0.0,
+                yaw: 90.0,
+                pitch: 0.0,
+                flags: 0,
+            },
+            &mut out,
+        )
+        .unwrap();
+        srv1.write_all(&out).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        drop(srv1);
+        drop(backend_listener);
+        let _ = dropped_tx.send(());
+
+        // Simulate restart delay before binding the same backend_addr again.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let restarted = TcpListener::bind(backend_addr).await.unwrap();
+        let (mut srv2, _) = restarted.accept().await.unwrap();
+        let mut s2_buf = BytesMut::new();
+        let _hs2: Handshake = read_next_frame(&mut srv2, &mut s2_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        let ls2: LoginStart = read_next_frame(&mut srv2, &mut s2_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        out.clear();
+        encode_packet(
+            &LoginSuccess {
+                uuid: ls2.player_uuid,
+                username: ls2.username,
+                properties: Vec::new(),
+                session_id: Uuid::nil(),
+            },
+            &mut out,
+        )
+        .unwrap();
+        srv2.write_all(&out).await.unwrap();
+        let _ack2: LoginAcknowledged = read_next_frame(&mut srv2, &mut s2_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        out.clear();
+        encode_packet(&FinishConfiguration, &mut out).unwrap();
+        srv2.write_all(&out).await.unwrap();
+        let _f_ack2: AcknowledgeFinishConfiguration =
+            read_next_frame(&mut srv2, &mut s2_buf, 65536)
+                .await
+                .unwrap()
+                .unwrap()
+                .decode_as()
+                .unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    });
+
+    let mut cfg = test_config(Some(backend_addr), ForwardingMode::None);
+    cfg.seamless_restart = true;
+    cfg.seamless_restart_timeout_secs = 5;
+    cfg.seamless_restart_poll_ms = 100;
+    cfg.seamless_restart_freeze = true;
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let state = Arc::new(ProxyState::new(cfg, RadonManager::new(), None));
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let (stream, peer) = proxy_listener.accept().await.unwrap();
+        handle_connection(stream, peer, server_state).await;
+    });
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut out = BytesMut::new();
+    encode_packet(
+        &Handshake {
+            protocol_version: VarInt(PROTOCOL_VERSION),
+            server_address: "localhost".into(),
+            server_port: proxy_addr.port(),
+            next_state: ConnectionState::Login,
+        },
+        &mut out,
+    )
+    .unwrap();
+    encode_packet(
+        &LoginStart {
+            username: "HoldTester".into(),
+            player_uuid: Uuid::from_u128(0xBEEF),
+        },
+        &mut out,
+    )
+    .unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let mut in_buf = BytesMut::new();
+    let _ls: LoginSuccess = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    out.clear();
+    encode_packet(&LoginAcknowledged, &mut out).unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let _fc: FinishConfiguration = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    out.clear();
+    encode_packet(&AcknowledgeFinishConfiguration, &mut out).unwrap();
+    client.write_all(&out).await.unwrap();
+
+    loop {
+        let frame = read_next_frame(&mut client, &mut in_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap();
+        if frame.id == SynchronizePlayerPosition::ID {
+            let _init_pos: SynchronizePlayerPosition = frame.decode_as().unwrap();
+            break;
+        }
+    }
+
+    dropped_rx.await.unwrap();
+
+    // Expect restart chat + initial freeze teleport, then try moving and verify freeze snaps back.
+    let restart_chat: SystemChatMessage = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    let NbtTag::String(msg) = restart_chat.content else {
+        panic!("expected string restart chat");
+    };
+    assert!(msg.contains("restarting"));
+
+    let freeze_pos1: SynchronizePlayerPosition = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    assert_eq!(freeze_pos1.x, 10.5);
+    assert_eq!(freeze_pos1.z, -3.5);
+
+    out.clear();
+    encode_packet(
+        &MovePlayerPos {
+            x: 99.0,
+            y: 70.0,
+            z: 99.0,
+            flags: 0x01,
+        },
+        &mut out,
+    )
+    .unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let freeze_pos2: SynchronizePlayerPosition = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    assert_eq!(freeze_pos2.x, 10.5);
+    assert_eq!(freeze_pos2.z, -3.5);
+
+    // Wait for StartConfiguration when backend restarts, acknowledge it, and verify reconnection!
+    loop {
+        let frame = read_next_frame(&mut client, &mut in_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap();
+        if frame.id == StartConfiguration::ID {
+            break;
+        }
+    }
+    out.clear();
+    encode_packet(&ConfigurationAcknowledged, &mut out).unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let _fc2: FinishConfiguration = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    out.clear();
+    encode_packet(&AcknowledgeFinishConfiguration, &mut out).unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let mut saw_reconnected = false;
+    for _ in 0..4 {
+        let frame = read_next_frame(&mut client, &mut in_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap();
+        if frame.id == SystemChatMessage::ID {
+            let chat: SystemChatMessage = frame.decode_as().unwrap();
+            if let NbtTag::String(text) = chat.content
+                && text.contains("Reconnected to restarted server")
+            {
+                saw_reconnected = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_reconnected,
+        "expected Reconnected to restarted server chat"
+    );
+    backend_task.await.unwrap();
 }

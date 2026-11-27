@@ -21,6 +21,7 @@ pub(super) async fn proxy_with_server_switch(
     username: &str,
     current_server: Option<&str>,
     control_rx: &mut mpsc::UnboundedReceiver<PlayerControl>,
+    last_pos: &mut PlayerHoldPos,
     cfg: &ProxyConfig,
 ) -> ProxyExit {
     let is_admin = cfg.admins.contains(&username.to_ascii_lowercase());
@@ -41,6 +42,7 @@ pub(super) async fn proxy_with_server_switch(
             state,
             username,
             current_server,
+            last_pos,
             cfg,
         )
         .await
@@ -63,6 +65,7 @@ pub(super) async fn proxy_with_server_switch(
             peer_addr,
             username,
             current_server,
+            last_pos,
             cfg,
         )
         .await
@@ -120,6 +123,7 @@ pub(super) async fn proxy_with_server_switch(
                     state,
                     username,
                     current_server,
+                    last_pos,
                     cfg,
                 )
                 .await
@@ -146,6 +150,7 @@ pub(super) async fn proxy_with_server_switch(
                     peer_addr,
                     username,
                     current_server,
+                    last_pos,
                     cfg,
                 )
                 .await
@@ -172,6 +177,7 @@ async fn process_client_buf(
     state: &ProxyState,
     username: &str,
     current_server: Option<&str>,
+    last_pos: &mut PlayerHoldPos,
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
@@ -187,6 +193,26 @@ async fn process_client_buf(
         let Ok(pkt) = decode_raw_frame_slice(frame, cfg.max_packet_size, client_compression) else {
             return Err(ProxyExit::Closed);
         };
+
+        if *client_state == WireState::Play {
+            if pkt.id == MovePlayerPos::ID
+                && let Ok(mv) = MovePlayerPos::decode_body(&mut &pkt.payload[..])
+            {
+                last_pos.x = mv.x;
+                last_pos.y = mv.y;
+                last_pos.z = mv.z;
+                last_pos.valid = true;
+            } else if pkt.id == MovePlayerPosRot::ID
+                && let Ok(mv) = MovePlayerPosRot::decode_body(&mut &pkt.payload[..])
+            {
+                last_pos.x = mv.x;
+                last_pos.y = mv.y;
+                last_pos.z = mv.z;
+                last_pos.yaw = mv.yaw;
+                last_pos.pitch = mv.pitch;
+                last_pos.valid = true;
+            }
+        }
 
         if *client_state == WireState::Login && pkt.id == LoginAcknowledged::ID {
             *client_state = WireState::Configuration;
@@ -468,6 +494,7 @@ async fn process_backend_buf(
     peer_addr: SocketAddr,
     username: &str,
     current_server: Option<&str>,
+    last_pos: &mut PlayerHoldPos,
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
@@ -509,6 +536,18 @@ async fn process_backend_buf(
                 consumed = frame_end;
                 continue;
             }
+        }
+
+        if *backend_state == WireState::Play
+            && pkt.id == SynchronizePlayerPosition::ID
+            && let Ok(pos) = SynchronizePlayerPosition::decode_body(&mut &pkt.payload[..])
+        {
+            last_pos.x = pos.x;
+            last_pos.y = pos.y;
+            last_pos.z = pos.z;
+            last_pos.yaw = pos.yaw;
+            last_pos.pitch = pos.pitch;
+            last_pos.valid = true;
         }
 
         if *backend_state == WireState::Play && pkt.id == DeclareCommands::ID {
@@ -559,7 +598,7 @@ async fn process_backend_buf(
             continue;
         }
 
-        if !cfg.try_servers.is_empty() {
+        if !cfg.try_servers.is_empty() || cfg.seamless_restart {
             let kick_reason = if *backend_state == WireState::Play && pkt.id == PlayDisconnect::ID {
                 PlayDisconnect::decode_body(&mut &pkt.payload[..])
                     .ok()

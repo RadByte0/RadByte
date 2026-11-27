@@ -169,10 +169,37 @@ pub struct ProxyConfigFile {
     /// Optional `minecraft:brand` override shown in F3 (e.g., `"RadProxy"`).
     #[serde(default)]
     pub proxy_brand: Option<String>,
+    /// Hold players in-world and reconnect automatically when the backend restarts.
+    #[serde(default = "default_true")]
+    pub seamless_restart: bool,
+    /// Maximum seconds to hold a player waiting for a restarting backend.
+    #[serde(default = "default_seamless_restart_timeout_secs")]
+    pub seamless_restart_timeout_secs: u64,
+    /// Polling interval in milliseconds when checking if a restarting backend is back online.
+    #[serde(default = "default_seamless_restart_poll_ms")]
+    pub seamless_restart_poll_ms: u64,
+    /// Freeze player movement in place while holding during a backend restart.
+    #[serde(default = "default_true")]
+    pub seamless_restart_freeze: bool,
+    /// ActionBar/chat message shown to players while waiting for a restarting backend.
+    #[serde(default = "default_seamless_restart_message")]
+    pub seamless_restart_message: String,
 }
 
 fn default_connect_timeout_ms() -> u64 {
     3000
+}
+
+fn default_seamless_restart_timeout_secs() -> u64 {
+    30
+}
+
+fn default_seamless_restart_poll_ms() -> u64 {
+    300
+}
+
+fn default_seamless_restart_message() -> String {
+    "Server is restarting, please wait...".into()
 }
 
 fn default_true() -> bool {
@@ -234,6 +261,11 @@ impl Default for ProxyConfigFile {
             server_groups: HashMap::new(),
             bungeecord_messaging: true,
             proxy_brand: Some("RadProxy".into()),
+            seamless_restart: true,
+            seamless_restart_timeout_secs: default_seamless_restart_timeout_secs(),
+            seamless_restart_poll_ms: default_seamless_restart_poll_ms(),
+            seamless_restart_freeze: true,
+            seamless_restart_message: default_seamless_restart_message(),
         }
     }
 }
@@ -321,6 +353,16 @@ pub struct ProxyConfig {
     pub bungeecord_messaging: bool,
     /// Optional `minecraft:brand` override shown in F3.
     pub proxy_brand: Option<String>,
+    /// Hold players in-world and reconnect automatically when the backend restarts.
+    pub seamless_restart: bool,
+    /// Maximum seconds to hold a player waiting for a restarting backend.
+    pub seamless_restart_timeout_secs: u64,
+    /// Polling interval in milliseconds when checking if a restarting backend is back online.
+    pub seamless_restart_poll_ms: u64,
+    /// Freeze player movement in place while holding during a backend restart.
+    pub seamless_restart_freeze: bool,
+    /// ActionBar/chat message shown to players while waiting for a restarting backend.
+    pub seamless_restart_message: String,
 }
 
 impl ProxyConfig {
@@ -499,6 +541,15 @@ impl ProxyConfig {
             server_groups: raw.server_groups,
             bungeecord_messaging: raw.bungeecord_messaging,
             proxy_brand: raw.proxy_brand.filter(|s| !s.trim().is_empty()),
+            seamless_restart: raw.seamless_restart,
+            seamless_restart_timeout_secs: raw.seamless_restart_timeout_secs.clamp(1, 300),
+            seamless_restart_poll_ms: raw.seamless_restart_poll_ms.clamp(100, 5000),
+            seamless_restart_freeze: raw.seamless_restart_freeze,
+            seamless_restart_message: if raw.seamless_restart_message.trim().is_empty() {
+                default_seamless_restart_message()
+            } else {
+                raw.seamless_restart_message
+            },
         })
     }
 }
@@ -728,6 +779,23 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
     ));
     out.push_str(&format!("radons-dir={}\n", file.radons_dir));
     out.push_str(&format!("radonfigs-dir={}\n", file.radonfigs_dir));
+    out.push_str(&format!("seamless-restart={}\n", file.seamless_restart));
+    out.push_str(&format!(
+        "seamless-restart-timeout-secs={}\n",
+        file.seamless_restart_timeout_secs
+    ));
+    out.push_str(&format!(
+        "seamless-restart-poll-ms={}\n",
+        file.seamless_restart_poll_ms
+    ));
+    out.push_str(&format!(
+        "seamless-restart-freeze={}\n",
+        file.seamless_restart_freeze
+    ));
+    out.push_str(&format!(
+        "seamless-restart-message={}\n",
+        file.seamless_restart_message
+    ));
     Ok(out)
 }
 
@@ -990,6 +1058,29 @@ fn read_proxy_properties(raw: &str) -> std::result::Result<ProxyConfigFile, Stri
                 } else {
                     Some(val.to_owned())
                 };
+            }
+            "seamless-restart" => {
+                cfg.seamless_restart = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid seamless-restart", idx + 1))?;
+            }
+            "seamless-restart-timeout-secs" => {
+                cfg.seamless_restart_timeout_secs = val.parse().map_err(|_| {
+                    format!("line {}: invalid seamless-restart-timeout-secs", idx + 1)
+                })?;
+            }
+            "seamless-restart-poll-ms" => {
+                cfg.seamless_restart_poll_ms = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid seamless-restart-poll-ms", idx + 1))?;
+            }
+            "seamless-restart-freeze" => {
+                cfg.seamless_restart_freeze = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid seamless-restart-freeze", idx + 1))?;
+            }
+            "seamless-restart-message" => {
+                cfg.seamless_restart_message = val.to_owned();
             }
             k if k.starts_with("auto-update") || k.starts_with("auto_update") => {}
             other => {
