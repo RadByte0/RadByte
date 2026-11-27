@@ -24,6 +24,24 @@ pub fn is_newer_version(latest_tag: &str, current_version: &str) -> bool {
     }
 }
 
+/// Returns a console notice string when `latest_tag` is newer than `current_version`.
+#[must_use]
+pub fn format_newer_version_notice(
+    app_name: &str,
+    current_version: &str,
+    latest_tag: &str,
+    repo: &str,
+) -> Option<String> {
+    if !is_newer_version(latest_tag, current_version) {
+        return None;
+    }
+    let clean_current = current_version.trim_start_matches(['v', 'V']);
+    let clean_latest = latest_tag.trim_start_matches(['v', 'V']);
+    Some(format!(
+        "New {app_name} version available: v{clean_latest} (current: v{clean_current}) — https://github.com/{repo}/releases/tag/{latest_tag}"
+    ))
+}
+
 fn is_truthy(val: &str) -> bool {
     matches!(
         val.trim().to_ascii_lowercase().as_str(),

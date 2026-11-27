@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use rad_core::api_runtime::{api_library_filename, api_release_asset_name, api_target_info};
 use rad_core::auto_update::{
-    cleanup_old_binary, get_auto_update_interval_minutes, has_staged_binary_update,
-    is_auto_update_enabled, is_auto_update_launcher_enabled, is_auto_update_radapi_enabled,
-    is_auto_update_radons_enabled, is_auto_update_versions_enabled, is_newer_version,
-    replace_current_binary_and_restart, scan_radon_github_targets, stage_binary_update,
+    cleanup_old_binary, format_newer_version_notice, get_auto_update_interval_minutes,
+    has_staged_binary_update, is_auto_update_enabled, is_auto_update_launcher_enabled,
+    is_auto_update_radapi_enabled, is_auto_update_radons_enabled, is_auto_update_versions_enabled,
+    is_newer_version, replace_current_binary_and_restart, scan_radon_github_targets,
+    stage_binary_update,
 };
 use sha2::{Digest, Sha256};
 
@@ -53,14 +54,33 @@ fn download_bytes(
 /// Checks GitHub Releases for newer launcher, version library, and `RadAPI` updates when enabled.
 pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &Path) {
     cleanup_old_binary();
+    let repo = release_repo();
     if !is_auto_update_enabled(cfg_path) {
+        std::thread::spawn(move || {
+            let Ok(client) = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
+                .build()
+            else {
+                return;
+            };
+            if let Some(latest_tag) = fetch_latest_tag(&client, repo)
+                && let Some(msg) = format_newer_version_notice(
+                    "RadServer",
+                    env!("CARGO_PKG_VERSION"),
+                    &latest_tag,
+                    repo,
+                )
+            {
+                tracing::warn!("{msg}");
+            }
+        });
         return;
     }
     let Ok((target, _, lib_ext)) = api_target_info() else {
         return;
     };
     let exe_ext = if cfg!(windows) { ".exe" } else { "" };
-    let repo = release_repo();
     let Ok(client) = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
@@ -73,9 +93,15 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &
         return;
     };
 
-    if is_auto_update_launcher_enabled(cfg_path)
-        && is_newer_version(&latest_tag, env!("CARGO_PKG_VERSION"))
+    let has_newer = if let Some(msg) =
+        format_newer_version_notice("RadServer", env!("CARGO_PKG_VERSION"), &latest_tag, repo)
     {
+        tracing::warn!("{msg}");
+        true
+    } else {
+        false
+    };
+    if is_auto_update_launcher_enabled(cfg_path) && has_newer {
         let asset = format!("rad-server-{target}{exe_ext}");
         let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
         if let Ok(bytes) = download_bytes(&client, &url, 64 * 1024 * 1024) {
