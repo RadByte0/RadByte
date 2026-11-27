@@ -452,17 +452,37 @@ impl TuiState {
         let footer_rows = 4usize;
         let log_height = height.saturating_sub(header_rows + footer_rows).max(1);
 
-        let mut wrapped_logs = Vec::new();
-        for entry in &self.logs {
-            wrap_ansi_or_plain(entry, width.saturating_sub(1).max(20), &mut wrapped_logs);
-        }
-
-        let total_wrapped = wrapped_logs.len();
-        let max_scroll = total_wrapped.saturating_sub(log_height);
-        let scroll = self.scroll_from_bottom.min(max_scroll);
-        let end = total_wrapped.saturating_sub(scroll);
-        let start = end.saturating_sub(log_height);
-        let visible = &wrapped_logs[start..end];
+        let wrap_width = width.saturating_sub(1).max(20);
+        let mut wrapped_logs = Vec::with_capacity(log_height.min(self.logs.len()));
+        let (scroll, visible_start, visible_end) = if self.scroll_from_bottom == 0 {
+            let mut rev_chunks: Vec<Vec<String>> = Vec::new();
+            let mut collected = 0usize;
+            for entry in self.logs.iter().rev() {
+                let mut chunk = Vec::new();
+                wrap_ansi_or_plain(entry, wrap_width, &mut chunk);
+                collected += chunk.len();
+                rev_chunks.push(chunk);
+                if collected >= log_height {
+                    break;
+                }
+            }
+            for chunk in rev_chunks.into_iter().rev() {
+                wrapped_logs.extend(chunk);
+            }
+            let total = wrapped_logs.len();
+            (0usize, total.saturating_sub(log_height), total)
+        } else {
+            for entry in &self.logs {
+                wrap_ansi_or_plain(entry, wrap_width, &mut wrapped_logs);
+            }
+            let total_wrapped = wrapped_logs.len();
+            let max_scroll = total_wrapped.saturating_sub(log_height);
+            let scroll = self.scroll_from_bottom.min(max_scroll);
+            let end = total_wrapped.saturating_sub(scroll);
+            let start = end.saturating_sub(log_height);
+            (scroll, start, end)
+        };
+        let visible = &wrapped_logs[visible_start..visible_end];
 
         let divider = "─".repeat(width);
         let mut out = String::with_capacity(4096);

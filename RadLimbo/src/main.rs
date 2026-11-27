@@ -70,7 +70,9 @@ impl RegistryProvider for LimboPackageProvider {
 }
 
 fn main() {
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get().min(4));
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
         .enable_all()
         .build()
         .expect("failed to build tokio runtime")

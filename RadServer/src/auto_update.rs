@@ -163,22 +163,26 @@ fn check_radon_updates(client: &reqwest::blocking::Client, radons_dir: &Path) {
 
 /// Downloads and stages a newer `RadServer` binary in the background while the server is running.
 pub fn check_and_stage_in_background() -> Option<String> {
-    let (target, _, _) = api_target_info().ok()?;
-    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
-    let repo = release_repo();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;
-    let latest_tag = fetch_latest_tag(&client, repo)?;
+    check_and_stage_with_client(&client)
+}
+
+fn check_and_stage_with_client(client: &reqwest::blocking::Client) -> Option<String> {
+    let (target, _, _) = api_target_info().ok()?;
+    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
+    let repo = release_repo();
+    let latest_tag = fetch_latest_tag(client, repo)?;
     if !is_newer_version(&latest_tag, env!("CARGO_PKG_VERSION")) {
         return None;
     }
     if !has_staged_binary_update() {
         let asset = format!("rad-server-{target}{exe_ext}");
         let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
-        let bytes = download_bytes(&client, &url, 64 * 1024 * 1024).ok()?;
+        let bytes = download_bytes(client, &url, 64 * 1024 * 1024).ok()?;
         stage_binary_update(&bytes).ok()?;
     }
     Some(latest_tag)
@@ -191,25 +195,27 @@ pub fn spawn_background_watcher(cfg_path: std::path::PathBuf) {
     }
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(60));
+        let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
+            .build()
+        else {
+            return;
+        };
+        let radons_dir = cfg_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join("radons");
         loop {
             if !is_auto_update_enabled(&cfg_path) {
                 return;
             }
-            if is_auto_update_radons_enabled(&cfg_path)
-                && let Ok(client) = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(10))
-                    .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
-                    .build()
-            {
-                let radons_dir = cfg_path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."))
-                    .join("radons");
+            if is_auto_update_radons_enabled(&cfg_path) {
                 check_radon_updates(&client, &radons_dir);
             }
             if is_auto_update_launcher_enabled(&cfg_path)
-                && let Some(tag) = check_and_stage_in_background()
+                && let Some(tag) = check_and_stage_with_client(&client)
             {
                 tracing::info!(
                     tag = %tag,
