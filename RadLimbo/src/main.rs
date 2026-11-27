@@ -72,6 +72,7 @@ fn main() {
 }
 
 async fn async_main() {
+    let startup_started = std::time::Instant::now();
     let _console_ui = ConsoleUi::start("RadLimbo", env!("CARGO_PKG_VERSION"), "status, stop");
     tracing_subscriber::fmt()
         .with_target(false)
@@ -150,7 +151,13 @@ async fn async_main() {
         }
     };
 
-    info!(%bind_addr, ?forwarding, config = %cfg_path.display(), "RadLimbo listening");
+    let elapsed = startup_started.elapsed().as_secs_f64();
+    info!(
+        %bind_addr,
+        ?forwarding,
+        config = %cfg_path.display(),
+        "Done ({elapsed:.2}s)! For help, type \"help\""
+    );
 
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     rad_core::console_ui::spawn_command_reader(move |line| cmd_tx.send(line).is_ok());

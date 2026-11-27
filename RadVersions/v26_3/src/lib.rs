@@ -42,6 +42,7 @@ async fn shutdown_signal() {
 /// Runs the Minecraft 26.3 (`protocol 777`) server using `cfg_path` (`rad.properties`)
 /// and `versions_dir` (`versions/`). Returns `0` on clean shutdown or non-zero on error.
 pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
+    let startup_started = std::time::Instant::now();
     let _ = tracing_subscriber::fmt()
         .with_target(false)
         .with_writer(rad_core::console_ui::make_log_writer)
@@ -156,6 +157,7 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
             }
         };
 
+        let elapsed = startup_started.elapsed().as_secs_f64();
         info!(
             %bind_addr,
             ?forwarding,
@@ -163,7 +165,7 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
             view_distance,
             simulation_distance,
             config = %cfg_path.display(),
-            "RadServer listening (via rad_version_26_3)"
+            "Done ({elapsed:.2}s)! For help, type \"help\""
         );
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

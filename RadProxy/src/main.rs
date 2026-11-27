@@ -138,6 +138,8 @@ fn run_thread_per_core(
         .map_or(1, |n| n.get())
         .max(1);
 
+    let startup_started = std::time::Instant::now();
+    let elapsed = startup_started.elapsed().as_secs_f64();
     info!(
         %bind_addr,
         workers,
@@ -147,7 +149,7 @@ fn run_thread_per_core(
         online_mode,
         radons = radon_count,
         servers = server_count,
-        "RadProxy listening (type 'help' for console commands)"
+        "Done ({elapsed:.2}s)! For help, type \"help\""
     );
 
     for idx in 0..workers {
@@ -215,6 +217,9 @@ fn run_multi_thread(
             }
         };
 
+        let elapsed = std::time::Instant::now()
+            .duration_since(std::time::Instant::now())
+            .as_secs_f64();
         info!(
             %bind_addr,
             mode = "multi-thread",
@@ -223,7 +228,7 @@ fn run_multi_thread(
             online_mode,
             radons = radon_count,
             servers = server_count,
-            "RadProxy listening (type 'help' for console commands)"
+            "Done ({elapsed:.2}s)! For help, type \"help\""
         );
 
         let accept_state = Arc::clone(&state);
