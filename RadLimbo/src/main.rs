@@ -96,6 +96,7 @@ async fn async_main() {
         exit_with_pause(1);
     }
     auto_update::run_startup_auto_update(&cfg_path);
+    auto_update::spawn_background_watcher(cfg_path.clone());
     let cfg = match LimboConfig::load_or_create(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
@@ -167,8 +168,21 @@ async fn async_main() {
                     "status" => {
                         info!(%bind_addr, ?forwarding, "RadLimbo online");
                     }
+                    "update" => {
+                        if rad_core::auto_update::has_staged_binary_update()
+                            || auto_update::check_and_stage_in_background().is_some()
+                        {
+                            info!("applying update and restarting RadLimbo...");
+                            if let Err(e) = rad_core::auto_update::apply_staged_binary_and_restart()
+                            {
+                                error!(error = %e, "failed to apply staged update");
+                            }
+                            break;
+                        }
+                        info!("RadLimbo is already up to date");
+                    }
                     "help" | "?" => {
-                        info!("commands: status, stop, help");
+                        info!("commands: status, update, stop, help");
                     }
                     "" => {}
                     other => {

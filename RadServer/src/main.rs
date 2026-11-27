@@ -65,6 +65,7 @@ fn main() {
     }
 
     auto_update::run_startup_auto_update(&cfg_path, work_dir, &versions_dir);
+    auto_update::spawn_background_watcher(cfg_path.clone());
 
     let _console_ui = ConsoleUi::start("RadServer", env!("CARGO_PKG_VERSION"), "help, op, stop");
 
@@ -143,6 +144,22 @@ fn main() {
         }
     };
 
+    let update_marker = Path::new(".radserver.update");
+    if exit_code == 0 && update_marker.is_file() {
+        let _ = std::fs::remove_file(update_marker);
+        drop(_console_ui);
+        drop(library);
+        if rad_core::auto_update::has_staged_binary_update()
+            || auto_update::check_and_stage_in_background().is_some()
+        {
+            if let Err(e) = rad_core::auto_update::apply_staged_binary_and_restart() {
+                error!(error = %e, "failed to apply staged update");
+                exit_with_pause(1);
+            }
+        } else {
+            info!("RadServer is already up to date");
+        }
+    }
     if exit_code != 0 {
         exit_with_pause(exit_code);
     }

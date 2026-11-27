@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use rad_core::api_runtime::{api_library_filename, api_release_asset_name, api_target_info};
 use rad_core::auto_update::{
-    cleanup_old_binary, is_auto_update_enabled, is_newer_version,
-    replace_current_binary_and_restart,
+    cleanup_old_binary, has_staged_binary_update, is_auto_update_enabled, is_newer_version,
+    replace_current_binary_and_restart, stage_binary_update,
 };
 
 fn release_repo() -> &'static str {
@@ -94,4 +94,70 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path) {
             }
         }
     }
+}
+
+/// Downloads and stages a newer `RadProxy` binary in the background while running.
+pub fn check_and_stage_in_background() -> Option<String> {
+    let (target, _, _) = api_target_info().ok()?;
+    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
+    let repo = release_repo();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(concat!("RadProxy/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let rel: serde_json::Value = client
+        .get(format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .ok()?
+        .json()
+        .ok()?;
+    let latest_tag = rel["tag_name"].as_str()?.to_owned();
+    if !is_newer_version(&latest_tag, env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    if !has_staged_binary_update() {
+        let asset = format!("rad-proxy-{target}{exe_ext}");
+        let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
+        let resp = client
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .ok()?;
+        let mut bytes = Vec::new();
+        resp.take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+            return None;
+        }
+        stage_binary_update(&bytes).ok()?;
+    }
+    Some(latest_tag)
+}
+
+/// Spawns a background watcher that checks for updates every 30 minutes while running.
+pub fn spawn_background_watcher(cfg_path: std::path::PathBuf) {
+    if !is_auto_update_enabled(&cfg_path) {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(60));
+        loop {
+            if !is_auto_update_enabled(&cfg_path) {
+                return;
+            }
+            if let Some(tag) = check_and_stage_in_background() {
+                tracing::info!(
+                    tag = %tag,
+                    "update downloaded in background; type 'update' to restart and apply"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(30 * 60));
+        }
+    });
 }

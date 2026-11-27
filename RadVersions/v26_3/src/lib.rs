@@ -194,6 +194,11 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
                     }
                 }
                 Some(cmd) = cmd_rx.recv() => {
+                    if cmd.trim().eq_ignore_ascii_case("update") {
+                        let _ = std::fs::write(".radserver.update", b"1");
+                        info!("saving world and restarting to apply update...");
+                        break;
+                    }
                     if crate::net::handle_console_command(&state, &cmd).await {
                         info!("shutting down RadServer (console stop), disconnecting players and saving world/playerdata");
                         break;

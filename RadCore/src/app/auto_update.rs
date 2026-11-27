@@ -124,23 +124,44 @@ pub fn cleanup_old_binary() {
     }
 }
 
-/// Replaces the current executable on disk with `new_bytes`, spawns the updated binary, and exits.
-pub fn replace_current_binary_and_restart(new_bytes: &[u8]) -> Result<(), String> {
+/// Writes `new_bytes` to `<current_exe>.new` so it can be applied on graceful restart.
+pub fn stage_binary_update(new_bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut new_os = exe.as_os_str().to_owned();
     new_os.push(".new");
     let new_path = std::path::PathBuf::from(new_os);
-
-    let mut old_os = exe.as_os_str().to_owned();
-    old_os.push(".old");
-    let old_path = std::path::PathBuf::from(old_os);
-
-    std::fs::write(&new_path, new_bytes).map_err(|e| format!("Failed to write update: {e}"))?;
+    std::fs::write(&new_path, new_bytes).map_err(|e| format!("Failed to stage update: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&new_path, std::fs::Permissions::from_mode(0o755));
     }
+    Ok(new_path)
+}
+
+/// Returns `true` when a staged `<current_exe>.new` binary is ready to apply.
+#[must_use]
+pub fn has_staged_binary_update() -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        let mut new_os = exe.as_os_str().to_owned();
+        new_os.push(".new");
+        std::path::Path::new(&new_os).is_file()
+    })
+}
+
+/// Applies a staged `<current_exe>.new` binary, spawns the updated binary, and exits.
+pub fn apply_staged_binary_and_restart() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut new_os = exe.as_os_str().to_owned();
+    new_os.push(".new");
+    let new_path = std::path::PathBuf::from(new_os);
+    if !new_path.is_file() {
+        return Err("No staged update binary found".into());
+    }
+
+    let mut old_os = exe.as_os_str().to_owned();
+    old_os.push(".old");
+    let old_path = std::path::PathBuf::from(old_os);
 
     if old_path.exists() {
         let _ = std::fs::remove_file(&old_path);
@@ -153,7 +174,6 @@ pub fn replace_current_binary_and_restart(new_bytes: &[u8]) -> Result<(), String
     if let Err(e) = std::fs::rename(&new_path, &exe) {
         #[cfg(windows)]
         let _ = std::fs::rename(&old_path, &exe);
-        let _ = std::fs::remove_file(&new_path);
         return Err(format!("Failed to install updated executable: {e}"));
     }
 
@@ -164,6 +184,12 @@ pub fn replace_current_binary_and_restart(new_bytes: &[u8]) -> Result<(), String
         .map_err(|e| format!("Updated binary saved, but failed to relaunch: {e}"))?;
     drop(child);
     std::process::exit(0);
+}
+
+/// Replaces the current executable on disk with `new_bytes`, spawns the updated binary, and exits.
+pub fn replace_current_binary_and_restart(new_bytes: &[u8]) -> Result<(), String> {
+    stage_binary_update(new_bytes)?;
+    apply_staged_binary_and_restart()
 }
 
 #[cfg(test)]

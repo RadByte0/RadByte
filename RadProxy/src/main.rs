@@ -67,6 +67,7 @@ fn main() {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     auto_update::run_startup_auto_update(&cfg_path, work_dir);
+    auto_update::spawn_background_watcher(cfg_path.clone());
     let config = match ProxyConfig::load_or_create(&cfg_path) {
         Ok(cfg) => cfg,
         Err(err) => {
@@ -256,8 +257,22 @@ async fn run_control_loop(state: Arc<ProxyState>) {
     loop {
         tokio::select! {
             Some(line) = cmd_rx.recv() => {
-                ConsoleUi::echo_command(line.trim());
-                if handle_console_command(line.trim(), &state) {
+                let cmd = line.trim();
+                ConsoleUi::echo_command(cmd);
+                if cmd.eq_ignore_ascii_case("update") {
+                    if rad_core::auto_update::has_staged_binary_update()
+                        || auto_update::check_and_stage_in_background().is_some()
+                    {
+                        info!("applying update and restarting RadProxy...");
+                        state.kick_all("Proxy is restarting to apply an update.");
+                        state.current_radons().disable_all();
+                        if let Err(e) = rad_core::auto_update::apply_staged_binary_and_restart() {
+                            error!(error = %e, "failed to apply staged update");
+                        }
+                        break;
+                    }
+                    info!("RadProxy is already up to date");
+                } else if handle_console_command(cmd, &state) {
                     state.kick_all("Proxy is shutting down.");
                     state.current_radons().disable_all();
                     break;

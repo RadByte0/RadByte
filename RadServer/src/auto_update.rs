@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use rad_core::api_runtime::{api_library_filename, api_release_asset_name, api_target_info};
 use rad_core::auto_update::{
-    cleanup_old_binary, is_auto_update_enabled, is_newer_version,
-    replace_current_binary_and_restart,
+    cleanup_old_binary, has_staged_binary_update, is_auto_update_enabled, is_newer_version,
+    replace_current_binary_and_restart, stage_binary_update,
 };
 use sha2::{Digest, Sha256};
 
@@ -133,4 +133,50 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &
             }
         }
     }
+}
+
+/// Downloads and stages a newer `RadServer` binary in the background while the server is running.
+pub fn check_and_stage_in_background() -> Option<String> {
+    let (target, _, _) = api_target_info().ok()?;
+    let exe_ext = if cfg!(windows) { ".exe" } else { "" };
+    let repo = release_repo();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+    let latest_tag = fetch_latest_tag(&client, repo)?;
+    if !is_newer_version(&latest_tag, env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
+    if !has_staged_binary_update() {
+        let asset = format!("rad-server-{target}{exe_ext}");
+        let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
+        let bytes = download_bytes(&client, &url, 64 * 1024 * 1024).ok()?;
+        stage_binary_update(&bytes).ok()?;
+    }
+    Some(latest_tag)
+}
+
+/// Spawns a background watcher that checks for updates every 30 minutes while running.
+pub fn spawn_background_watcher(cfg_path: std::path::PathBuf) {
+    if !is_auto_update_enabled(&cfg_path) {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(60));
+        loop {
+            if !is_auto_update_enabled(&cfg_path) {
+                return;
+            }
+            if let Some(tag) = check_and_stage_in_background() {
+                tracing::info!(
+                    tag = %tag,
+                    "update downloaded in background; type 'update' to save world and restart"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(30 * 60));
+        }
+    });
 }
