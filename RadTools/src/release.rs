@@ -6,17 +6,15 @@ struct TargetInfo {
     library: &'static str,
     ext: &'static str,
     label: &'static str,
-    is_other: bool,
 }
 
-const TARGETS: [TargetInfo; 11] = [
+const TARGETS: [TargetInfo; 8] = [
     TargetInfo {
         triple: "x86_64-pc-windows-msvc",
         exe: ".exe",
         library: "rad_version_26_3",
         ext: ".dll",
         label: "Windows x64",
-        is_other: false,
     },
     TargetInfo {
         triple: "aarch64-pc-windows-msvc",
@@ -24,7 +22,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "rad_version_26_3",
         ext: ".dll",
         label: "Windows ARM64",
-        is_other: false,
     },
     TargetInfo {
         triple: "x86_64-unknown-linux-gnu",
@@ -32,7 +29,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "librad_version_26_3",
         ext: ".so",
         label: "Linux x64",
-        is_other: false,
     },
     TargetInfo {
         triple: "aarch64-unknown-linux-gnu",
@@ -40,7 +36,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "librad_version_26_3",
         ext: ".so",
         label: "Linux ARM64",
-        is_other: false,
     },
     TargetInfo {
         triple: "x86_64-unknown-linux-musl",
@@ -48,7 +43,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "librad_version_26_3",
         ext: ".so",
         label: "Linux x64 (musl)",
-        is_other: false,
     },
     TargetInfo {
         triple: "aarch64-unknown-linux-musl",
@@ -56,7 +50,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "librad_version_26_3",
         ext: ".so",
         label: "Linux ARM64 (musl)",
-        is_other: false,
     },
     TargetInfo {
         triple: "x86_64-apple-darwin",
@@ -64,7 +57,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "librad_version_26_3",
         ext: ".dylib",
         label: "macOS x64",
-        is_other: false,
     },
     TargetInfo {
         triple: "aarch64-apple-darwin",
@@ -72,31 +64,6 @@ const TARGETS: [TargetInfo; 11] = [
         library: "librad_version_26_3",
         ext: ".dylib",
         label: "macOS ARM64",
-        is_other: false,
-    },
-    TargetInfo {
-        triple: "riscv64gc-unknown-linux-musl",
-        exe: "",
-        library: "librad_version_26_3",
-        ext: ".so",
-        label: "Linux RISC-V 64 (musl)",
-        is_other: true,
-    },
-    TargetInfo {
-        triple: "powerpc64le-unknown-linux-musl",
-        exe: "",
-        library: "librad_version_26_3",
-        ext: ".so",
-        label: "Linux POWER64LE (musl)",
-        is_other: true,
-    },
-    TargetInfo {
-        triple: "i686-unknown-linux-musl",
-        exe: "",
-        library: "librad_version_26_3",
-        ext: ".so",
-        label: "Linux x86 32-bit (musl)",
-        is_other: true,
     },
 ];
 
@@ -165,7 +132,7 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
         ("RadLimbo", "limbo"),
     ] {
         text.push_str(&format!("<details>\n<summary>{title}</summary>\n\n"));
-        for info in TARGETS.iter().filter(|t| !t.is_other) {
+        for info in &TARGETS {
             let file = format!("rad-{service}-{}{}", info.triple, info.exe);
             if !assets.join(&file).is_file() {
                 return Err(format!("Missing release asset: {file}"));
@@ -175,18 +142,7 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
                 info.label
             ));
         }
-        text.push_str("\n<details>\n<summary>Other</summary>\n\n");
-        for info in TARGETS.iter().filter(|t| t.is_other) {
-            let file = format!("rad-{service}-{}{}", info.triple, info.exe);
-            if !assets.join(&file).is_file() {
-                return Err(format!("Missing release asset: {file}"));
-            }
-            text.push_str(&format!(
-                "- **{}:** [Download]({base}/{file})\n",
-                info.label
-            ));
-        }
-        text.push_str("\n</details>\n\n</details>\n\n");
+        text.push_str("\n</details>\n\n");
     }
     std::fs::write(output, text).map_err(|e| e.to_string())
 }

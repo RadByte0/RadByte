@@ -38,15 +38,6 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: riscv64gc-unknown-linux-musl
-            os: ubuntu-latest
-            zigbuild: true
-          - target: powerpc64le-unknown-linux-musl
-            os: ubuntu-latest
-            zigbuild: true
-          - target: i686-unknown-linux-musl
-            os: ubuntu-latest
-            zigbuild: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
