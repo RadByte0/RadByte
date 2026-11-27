@@ -1,41 +1,129 @@
 use std::path::Path;
 
-const TARGETS: [(&str, &str, &str, &str); 8] = [
-    ("x86_64-pc-windows-msvc", ".exe", "rad_version_26_3", ".dll"),
-    (
-        "aarch64-pc-windows-msvc",
-        ".exe",
-        "rad_version_26_3",
-        ".dll",
-    ),
-    ("x86_64-unknown-linux-gnu", "", "librad_version_26_3", ".so"),
-    (
-        "aarch64-unknown-linux-gnu",
-        "",
-        "librad_version_26_3",
-        ".so",
-    ),
-    (
-        "x86_64-unknown-linux-musl",
-        "",
-        "librad_version_26_3",
-        ".so",
-    ),
-    (
-        "aarch64-unknown-linux-musl",
-        "",
-        "librad_version_26_3",
-        ".so",
-    ),
-    ("x86_64-apple-darwin", "", "librad_version_26_3", ".dylib"),
-    ("aarch64-apple-darwin", "", "librad_version_26_3", ".dylib"),
+struct TargetInfo {
+    triple: &'static str,
+    exe: &'static str,
+    library: &'static str,
+    ext: &'static str,
+    label: &'static str,
+    is_other: bool,
+}
+
+const TARGETS: [TargetInfo; 13] = [
+    TargetInfo {
+        triple: "x86_64-pc-windows-msvc",
+        exe: ".exe",
+        library: "rad_version_26_3",
+        ext: ".dll",
+        label: "Windows x64",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "aarch64-pc-windows-msvc",
+        exe: ".exe",
+        library: "rad_version_26_3",
+        ext: ".dll",
+        label: "Windows ARM64",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "x86_64-unknown-linux-gnu",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux x64",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "aarch64-unknown-linux-gnu",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux ARM64",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "x86_64-unknown-linux-musl",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux x64 (musl)",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "aarch64-unknown-linux-musl",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux ARM64 (musl)",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "x86_64-apple-darwin",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".dylib",
+        label: "macOS x64",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "aarch64-apple-darwin",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".dylib",
+        label: "macOS ARM64",
+        is_other: false,
+    },
+    TargetInfo {
+        triple: "armv7-unknown-linux-musleabihf",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux ARMv7 (musl)",
+        is_other: true,
+    },
+    TargetInfo {
+        triple: "riscv64gc-unknown-linux-musl",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux RISC-V 64 (musl)",
+        is_other: true,
+    },
+    TargetInfo {
+        triple: "s390x-unknown-linux-musl",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux s390x (musl)",
+        is_other: true,
+    },
+    TargetInfo {
+        triple: "powerpc64le-unknown-linux-musl",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux POWER64LE (musl)",
+        is_other: true,
+    },
+    TargetInfo {
+        triple: "i686-unknown-linux-musl",
+        exe: "",
+        library: "librad_version_26_3",
+        ext: ".so",
+        label: "Linux x86 32-bit (musl)",
+        is_other: true,
+    },
 ];
 
 pub fn stage(target: &str, build: &Path, out: &Path) -> Result<(), String> {
-    let (_, exe, library, ext) = TARGETS
+    let info = TARGETS
         .iter()
-        .find(|t| t.0 == target)
+        .find(|t| t.triple == target)
         .ok_or("Unsupported release target")?;
+    let exe = info.exe;
+    let library = info.library;
+    let ext = info.ext;
     let mut files: Vec<(String, String)> = ["server", "proxy", "limbo"]
         .iter()
         .map(|service| {
@@ -93,33 +181,28 @@ pub fn notes(repository: &str, tag: &str, assets: &Path, output: &Path) -> Resul
         ("RadLimbo", "limbo"),
     ] {
         text.push_str(&format!("<details>\n<summary>{title}</summary>\n\n"));
-        for (target, exe, _, _) in TARGETS {
-            let os = if target.contains("windows") {
-                "Windows"
-            } else if target.contains("linux") {
-                "Linux"
-            } else {
-                "macOS"
-            };
-            let arch = if target.starts_with("x86_64") {
-                "x64"
-            } else {
-                "ARM64"
-            };
-            let abi = if target.contains("musl") {
-                " (musl)"
-            } else {
-                ""
-            };
-            let file = format!("rad-{service}-{target}{exe}");
+        for info in TARGETS.iter().filter(|t| !t.is_other) {
+            let file = format!("rad-{service}-{}{}", info.triple, info.exe);
             if !assets.join(&file).is_file() {
                 return Err(format!("Missing release asset: {file}"));
             }
             text.push_str(&format!(
-                "- **{os} {arch}{abi}:** [Download]({base}/{file})\n"
+                "- **{}:** [Download]({base}/{file})\n",
+                info.label
             ));
         }
-        text.push_str("\n</details>\n\n");
+        text.push_str("\n<details>\n<summary>Other</summary>\n\n");
+        for info in TARGETS.iter().filter(|t| t.is_other) {
+            let file = format!("rad-{service}-{}{}", info.triple, info.exe);
+            if !assets.join(&file).is_file() {
+                return Err(format!("Missing release asset: {file}"));
+            }
+            text.push_str(&format!(
+                "- **{}:** [Download]({base}/{file})\n",
+                info.label
+            ));
+        }
+        text.push_str("\n</details>\n\n</details>\n\n");
     }
     std::fs::write(output, text).map_err(|e| e.to_string())
 }
