@@ -372,7 +372,7 @@ pub fn ensure_installed_headless(work_dir: &Path, versions_dir: &Path) -> Result
 
     let _ = std::fs::create_dir_all(&import_dir);
     if std::io::stdin().is_terminal() {
-        match prompt_console_setup()? {
+        match prompt_console_setup(work_dir)? {
             ConsoleSetupChoice::Mojang(tag) => {
                 ensure_eula_accepted(work_dir, &import_dir)?;
                 return install_from_mojang_with_progress(
@@ -418,7 +418,7 @@ fn filter_console_releases(
     out
 }
 
-fn prompt_console_setup() -> Result<ConsoleSetupChoice, String> {
+fn prompt_console_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, String> {
     println!(
         "  \x1b[38;2;232;125;13m[FIRST-RUN SETUP]\x1b[0m Fetching available RadByte releases..."
     );
@@ -432,14 +432,17 @@ fn prompt_console_setup() -> Result<ConsoleSetupChoice, String> {
             game_version: "26.3".to_owned(),
         }],
     };
+    let cfg_path = work_dir.join("rad.properties");
+    let mut auto_update = rad_core::auto_update::is_auto_update_enabled(&cfg_path);
     let mut show_older = false;
     let mut query = String::new();
     let stdin = std::io::stdin();
     loop {
         let filtered = filter_console_releases(&all, &query, show_older);
+        let auto_mark = if auto_update { "[x] ON" } else { "[ ] OFF" };
         println!();
         println!(
-            "  \x1b[1;37mAvailable versions\x1b[0m (older: {}, filter: {}):",
+            "  \x1b[1;37mAvailable versions\x1b[0m (older: {}, filter: {}, auto-update: \x1b[38;2;232;125;13m{auto_mark}\x1b[0m):",
             if show_older { "shown" } else { "hidden" },
             if query.is_empty() { "none" } else { &query }
         );
@@ -461,7 +464,7 @@ fn prompt_console_setup() -> Result<ConsoleSetupChoice, String> {
             }
         }
         println!(
-            "  \x1b[90mCommands: [Enter]=#1, [1..N]=select, [a]=toggle older, [s <text>]=search, [local <dir>]=local data\x1b[0m"
+            "  \x1b[90mCommands: [Enter]=#1, [1..N]=select, [a]=toggle older, [u]=toggle auto-update, [s <text>]=search, [local <dir>]=local data\x1b[0m"
         );
         print!("  \x1b[38;2;232;125;13m>\x1b[0m Select version [1]: ");
         let _ = std::io::stdout().flush();
@@ -473,6 +476,7 @@ fn prompt_console_setup() -> Result<ConsoleSetupChoice, String> {
             .map_err(|e| format!("Failed to read console input: {e}"))?;
         let trimmed = input.trim();
         if trimmed.is_empty() {
+            let _ = rad_core::auto_update::set_auto_update_setting(&cfg_path, auto_update);
             let tag = filtered
                 .first()
                 .map(|r| r.tag.clone())
@@ -481,6 +485,11 @@ fn prompt_console_setup() -> Result<ConsoleSetupChoice, String> {
         }
         if trimmed.eq_ignore_ascii_case("a") || trimmed.eq_ignore_ascii_case("all") {
             show_older = !show_older;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("u") || trimmed.eq_ignore_ascii_case("update") {
+            auto_update = !auto_update;
+            let _ = rad_core::auto_update::set_auto_update_setting(&cfg_path, auto_update);
             continue;
         }
         if let Some(rest) = trimmed

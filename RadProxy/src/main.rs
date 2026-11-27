@@ -3,6 +3,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod auto_update;
 mod config;
 mod metrics;
 mod net;
@@ -57,6 +58,11 @@ fn main() {
     }
 
     let cfg_path = resolve_config_path("rad.properties");
+    let work_dir = cfg_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    auto_update::run_startup_auto_update(&cfg_path, work_dir);
     let config = match ProxyConfig::load_or_create(&cfg_path) {
         Ok(cfg) => cfg,
         Err(err) => {

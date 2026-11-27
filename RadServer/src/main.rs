@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod api_install;
+mod auto_update;
 mod version_download;
 mod version_install;
 mod version_selection;
@@ -62,6 +63,8 @@ fn main() {
         error!(error = %e, "version setup required before starting RadServer");
         exit_with_pause(1);
     }
+
+    auto_update::run_startup_auto_update(&cfg_path, work_dir, &versions_dir);
 
     let _console_ui = ConsoleUi::start("RadServer", env!("CARGO_PKG_VERSION"), "help, op, stop");
 
