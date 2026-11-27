@@ -38,13 +38,7 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: armv7-unknown-linux-musleabihf
-            os: ubuntu-latest
-            zigbuild: true
           - target: riscv64gc-unknown-linux-musl
-            os: ubuntu-latest
-            zigbuild: true
-          - target: s390x-unknown-linux-musl
             os: ubuntu-latest
             zigbuild: true
           - target: powerpc64le-unknown-linux-musl
@@ -69,16 +63,19 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.zigbuild
         uses: taiki-e/install-action@cargo-zigbuild
-      - name: Build workspace
+      - name: Build workspace (standard)
+        if: "!matrix.zigbuild"
         env:
           RADBYTE_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           RADBYTE_RELEASE_REPOSITORY: ${{ github.repository }}
-        run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            cargo zigbuild --workspace --release --locked --target ${{ matrix.target }}
-          else
-            cargo build --workspace --release --locked --target ${{ matrix.target }}
-          fi
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Build workspace (zigbuild)
+        if: matrix.zigbuild
+        env:
+          RADBYTE_RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          RADBYTE_RELEASE_REPOSITORY: ${{ github.repository }}
+          RUSTFLAGS: "-C target-feature=-crt-static"
+        run: cargo zigbuild --workspace --release --locked --target ${{ matrix.target }}
       - name: Stage individual release files
         run: cargo run --locked --release -p rad-tools -- stage-release ${{ matrix.target }}
       - uses: actions/upload-artifact@v4

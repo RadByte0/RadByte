@@ -9,7 +9,7 @@ struct TargetInfo {
     is_other: bool,
 }
 
-const TARGETS: [TargetInfo; 13] = [
+const TARGETS: [TargetInfo; 11] = [
     TargetInfo {
         triple: "x86_64-pc-windows-msvc",
         exe: ".exe",
@@ -75,27 +75,11 @@ const TARGETS: [TargetInfo; 13] = [
         is_other: false,
     },
     TargetInfo {
-        triple: "armv7-unknown-linux-musleabihf",
-        exe: "",
-        library: "librad_version_26_3",
-        ext: ".so",
-        label: "Linux ARMv7 (musl)",
-        is_other: true,
-    },
-    TargetInfo {
         triple: "riscv64gc-unknown-linux-musl",
         exe: "",
         library: "librad_version_26_3",
         ext: ".so",
         label: "Linux RISC-V 64 (musl)",
-        is_other: true,
-    },
-    TargetInfo {
-        triple: "s390x-unknown-linux-musl",
-        exe: "",
-        library: "librad_version_26_3",
-        ext: ".so",
-        label: "Linux s390x (musl)",
         is_other: true,
     },
     TargetInfo {

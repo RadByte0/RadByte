@@ -15,9 +15,7 @@ pub fn api_target_info() -> Result<(&'static str, &'static str, &'static str), S
         }
         ("linux", "x86_64") => Ok(("x86_64-unknown-linux-gnu", "lib", "so")),
         ("linux", "aarch64") => Ok(("aarch64-unknown-linux-gnu", "lib", "so")),
-        ("linux", "arm") => Ok(("armv7-unknown-linux-musleabihf", "lib", "so")),
         ("linux", "riscv64") => Ok(("riscv64gc-unknown-linux-musl", "lib", "so")),
-        ("linux", "s390x") => Ok(("s390x-unknown-linux-musl", "lib", "so")),
         ("linux", "powerpc64") => Ok(("powerpc64le-unknown-linux-musl", "lib", "so")),
         ("linux", "x86") => Ok(("i686-unknown-linux-musl", "lib", "so")),
         ("macos", "x86_64") => Ok(("x86_64-apple-darwin", "lib", "dylib")),
