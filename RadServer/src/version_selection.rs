@@ -43,7 +43,7 @@ fn read_checked_file(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
-fn parse_rad_properties_version(raw: &str) -> Option<String> {
+fn parse_rad_properties_key(raw: &str, keys: &[&str]) -> Option<String> {
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -51,13 +51,26 @@ fn parse_rad_properties_version(raw: &str) -> Option<String> {
         }
         if let Some((k, v)) = trimmed.split_once('=') {
             let key = k.trim();
-            if key.eq_ignore_ascii_case("version") || key.eq_ignore_ascii_case("minecraft-version")
-            {
+            if keys.iter().any(|target| key.eq_ignore_ascii_case(target)) {
                 return Some(v.trim().trim_matches('"').trim_matches('\'').to_owned());
             }
         }
     }
     None
+}
+
+/// Reads `version=` (or `minecraft-version=`) from `rad.properties` if present.
+#[must_use]
+pub fn read_configured_version(rad_cfg_path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(rad_cfg_path).ok()?;
+    parse_rad_properties_key(&raw, &["version", "minecraft-version"]).filter(|s| !s.is_empty())
+}
+
+/// Reads `version-tag=` from `rad.properties` if present.
+#[must_use]
+pub fn read_configured_version_tag(rad_cfg_path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(rad_cfg_path).ok()?;
+    parse_rad_properties_key(&raw, &["version-tag"]).filter(|s| !s.is_empty())
 }
 
 /// Persists `version=<ver>` in `rad_cfg_path` (`rad.properties`), preserving existing lines.
@@ -137,7 +150,7 @@ fn upsert_rad_properties(rad_cfg_path: &Path, pairs: &[(&str, String)]) -> Resul
 pub fn load(rad_cfg_path: &Path, versions_dir: &Path) -> Result<String, String> {
     if rad_cfg_path.exists() {
         let raw = read_checked_file(rad_cfg_path)?;
-        if let Some(ver) = parse_rad_properties_version(&raw) {
+        if let Some(ver) = parse_rad_properties_key(&raw, &["version", "minecraft-version"]) {
             return validate_version(&ver, rad_cfg_path);
         }
     }

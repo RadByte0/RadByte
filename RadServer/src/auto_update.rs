@@ -86,8 +86,10 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &
         }
     }
 
-    // Update installed version library (`versions/26.3/`) if it came from an older release tag.
-    let ver_dir = versions_dir.join("26.3");
+    // Update installed version library (`versions/<version>/`) if it came from an older release tag.
+    let active_ver = crate::version_selection::read_configured_version(cfg_path)
+        .unwrap_or_else(|| "26.3".to_owned());
+    let ver_dir = versions_dir.join(&active_ver);
     let manifest_path = ver_dir.join("version.json");
     let tag_marker = ver_dir.join(".release_tag");
     let current_ver_tag = std::fs::read_to_string(&tag_marker).unwrap_or_default();
@@ -97,7 +99,7 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &
         && let Ok(raw) = std::fs::read_to_string(&manifest_path)
         && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&raw)
     {
-        let asset = format!("rad-version-26.3-{target}.{lib_ext}");
+        let asset = format!("rad-version-{active_ver}-{target}.{lib_ext}");
         let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
         if let Ok(bytes) = download_bytes(&client, &url, 64 * 1024 * 1024) {
             let lib_path = ver_dir.join(&asset);
@@ -110,7 +112,7 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &
                 if let Ok(updated) = serde_json::to_string_pretty(&json) {
                     let _ = std::fs::write(&manifest_path, updated);
                     let _ = std::fs::write(&tag_marker, &latest_tag);
-                    tracing::info!(tag = %latest_tag, "auto-updated rad-version 26.3 library");
+                    tracing::info!(version = %active_ver, tag = %latest_tag, "auto-updated version library");
                 }
             } else {
                 let _ = std::fs::remove_file(&tmp);

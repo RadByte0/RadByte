@@ -331,10 +331,40 @@ fn install_with_source(
     result
 }
 
-/// Ensures version `26.3` is installed (via `import/`, interactive console setup, or Mojang `--reports` after EULA).
+/// Ensures the configured Minecraft version (default `26.3`) is installed.
 pub fn ensure_installed_headless(work_dir: &Path, versions_dir: &Path) -> Result<(), String> {
-    if versions_dir.join("26.3").join("version.json").is_file() {
+    let rad_cfg_path = work_dir.join("rad.properties");
+    let requested_ver = crate::version_selection::read_configured_version(&rad_cfg_path)
+        .unwrap_or_else(|| "26.3".to_owned());
+    if versions_dir
+        .join(&requested_ver)
+        .join("version.json")
+        .is_file()
+    {
         return Ok(());
+    }
+
+    if requested_ver != "26.3" {
+        let tag =
+            crate::version_selection::read_configured_version_tag(&rad_cfg_path).or_else(|| {
+                fetch_available_releases().ok().and_then(|list| {
+                    list.into_iter()
+                        .find(|r| r.game_version == requested_ver)
+                        .map(|r| r.tag)
+                })
+            });
+        let Some(tag) = tag else {
+            return Err(format!(
+                "Minecraft {requested_ver} is not installed locally and no matching release was found on GitHub"
+            ));
+        };
+        tracing::info!(version = %requested_ver, %tag, "switching/installing Minecraft version from rad.properties");
+        return install_version_from_mojang_with_progress(
+            versions_dir,
+            &requested_ver,
+            Some(&tag),
+            &mut |msg| tracing::info!("{msg}"),
+        );
     }
 
     let import_dir = work_dir.join("import");
@@ -933,14 +963,25 @@ pub fn install_from_mojang_with_progress(
     tag_override: Option<&str>,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(), String> {
+    install_version_from_mojang_with_progress(versions, "26.3", tag_override, on_progress)
+}
+
+fn install_version_from_mojang_with_progress(
+    versions: &Path,
+    game_version: &str,
+    tag_override: Option<&str>,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
 
-    tracing::info!("fetching Mojang version manifest for Minecraft 26.3");
-    on_progress("Fetching Mojang version manifest for Minecraft 26.3...");
+    tracing::info!(version = %game_version, "fetching Mojang version manifest");
+    on_progress(&format!(
+        "Fetching Mojang version manifest for Minecraft {game_version}..."
+    ));
     let manifest: serde_json::Value = client
         .get(MOJANG_MANIFEST_URL)
         .send()
@@ -951,24 +992,30 @@ pub fn install_from_mojang_with_progress(
 
     let version_url = manifest["versions"]
         .as_array()
-        .and_then(|arr| arr.iter().find(|v| v["id"] == "26.3"))
+        .and_then(|arr| arr.iter().find(|v| v["id"] == game_version))
         .and_then(|v| v["url"].as_str())
-        .ok_or("Minecraft 26.3 was not found in Mojang's version manifest.")?;
+        .ok_or_else(|| {
+            format!("Minecraft {game_version} was not found in Mojang's version manifest.")
+        })?;
 
     let version_meta: serde_json::Value = client
         .get(version_url)
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("Cannot fetch Minecraft 26.3 metadata: {e}"))?
+        .map_err(|e| format!("Cannot fetch Minecraft {game_version} metadata: {e}"))?
         .json()
         .map_err(|e| e.to_string())?;
 
     let server_url = version_meta["downloads"]["server"]["url"]
         .as_str()
-        .ok_or("Mojang metadata for 26.3 is missing downloads.server.url")?;
+        .ok_or_else(|| {
+            format!("Mojang metadata for {game_version} is missing downloads.server.url")
+        })?;
     let expected_sha1 = version_meta["downloads"]["server"]["sha1"]
         .as_str()
-        .ok_or("Mojang metadata for 26.3 is missing downloads.server.sha1")?;
+        .ok_or_else(|| {
+            format!("Mojang metadata for {game_version} is missing downloads.server.sha1")
+        })?;
 
     std::fs::create_dir_all(versions).map_err(|e| e.to_string())?;
     let work = versions.join(format!(".rad-mojang-{}", std::process::id()));

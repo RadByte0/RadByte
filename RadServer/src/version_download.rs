@@ -21,9 +21,7 @@ pub fn install_missing(package: &LoadedVersionPackage) -> Result<(), String> {
     if destination.symlink_metadata().is_ok() {
         return Ok(()); // Existing files are checked by the normal package verifier.
     }
-    if package.manifest().game_version != "26.3" {
-        return Err("automatic installation is not available for this game version".into());
-    }
+    let game_version = &package.manifest().game_version;
     if lib.abi_version != RAD_VERSION_ABI_VERSION
         || lib.target_os != std::env::consts::OS
         || lib.target_arch != std::env::consts::ARCH
@@ -41,21 +39,9 @@ pub fn install_missing(package: &LoadedVersionPackage) -> Result<(), String> {
                     .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         })
         .ok_or("automatic library installation is available only in tagged release builds")?;
-    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
-        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        _ => return Err("unsupported platform for automatic library installation".into()),
-    };
-    let asset = match std::env::consts::OS {
-        "windows" => format!("rad-version-26.3-{target}.dll"),
-        "linux" => format!("rad-version-26.3-{target}.so"),
-        "macos" => format!("rad-version-26.3-{target}.dylib"),
-        _ => unreachable!(),
-    };
+    let (target, _, ext) = rad_core::api_runtime::api_target_info()
+        .map_err(|_| "unsupported platform for automatic library installation".to_owned())?;
+    let asset = format!("rad-version-{game_version}-{target}.{ext}");
     let repository = option_env!("RADBYTE_RELEASE_REPOSITORY").unwrap_or("RadByte0/RadByte");
     if !repository
         .bytes()
