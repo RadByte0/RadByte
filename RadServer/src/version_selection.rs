@@ -62,24 +62,64 @@ fn parse_rad_properties_version(raw: &str) -> Option<String> {
 
 /// Persists `version=<ver>` in `rad_cfg_path` (`rad.properties`), preserving existing lines.
 pub fn write_version(rad_cfg_path: &Path, version: &str) -> Result<(), String> {
+    upsert_rad_properties(rad_cfg_path, &[("version", version.to_owned())])
+}
+
+/// Persists detailed version metadata (`version`, `version-protocol`, `version-data-version`,
+/// `version-source`, `version-tag`) in `rad_cfg_path` (`rad.properties`).
+pub fn write_version_details(
+    rad_cfg_path: &Path,
+    manifest: &rad_core::version_package::VersionManifest,
+    versions_dir: &Path,
+) -> Result<(), String> {
+    let tag_marker = versions_dir
+        .join(&manifest.game_version)
+        .join(".release_tag");
+    let tag = std::fs::read_to_string(tag_marker)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| concat!("v", env!("CARGO_PKG_VERSION")).to_owned());
+    upsert_rad_properties(
+        rad_cfg_path,
+        &[
+            ("version", manifest.game_version.clone()),
+            ("version-protocol", manifest.protocol_version.to_string()),
+            (
+                "version-data-version",
+                manifest.world_data_version.to_string(),
+            ),
+            ("version-source", manifest.source.clone()),
+            ("version-tag", tag),
+        ],
+    )
+}
+
+fn upsert_rad_properties(rad_cfg_path: &Path, pairs: &[(&str, String)]) -> Result<(), String> {
     let existing = std::fs::read_to_string(rad_cfg_path).unwrap_or_default();
     let mut lines: Vec<String> = Vec::new();
-    let mut updated = false;
+    let mut seen = vec![false; pairs.len()];
     for line in existing.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with('#')
             && let Some((k, _)) = trimmed.split_once('=')
-            && (k.trim().eq_ignore_ascii_case("version")
-                || k.trim().eq_ignore_ascii_case("minecraft-version"))
         {
-            lines.push(format!("version={version}"));
-            updated = true;
-            continue;
+            let key = k.trim();
+            if let Some(idx) = pairs.iter().position(|(pk, _)| {
+                key.eq_ignore_ascii_case(pk)
+                    || (*pk == "version" && key.eq_ignore_ascii_case("minecraft-version"))
+            }) {
+                lines.push(format!("{}={}", pairs[idx].0, pairs[idx].1));
+                seen[idx] = true;
+                continue;
+            }
         }
         lines.push(line.to_owned());
     }
-    if !updated {
-        lines.push(format!("version={version}"));
+    for (idx, (k, v)) in pairs.iter().enumerate() {
+        if !seen[idx] {
+            lines.push(format!("{k}={v}"));
+        }
     }
     if let Some(parent) = rad_cfg_path.parent()
         && !parent.as_os_str().is_empty()

@@ -91,6 +91,11 @@ fn main() {
         error!(error = %e, "failed to install missing version library");
         exit_with_pause(1);
     }
+    let _ = version_selection::write_version_details(
+        &rad_cfg_path,
+        version_package.manifest(),
+        &versions_dir,
+    );
 
     let lib_path = match version_package.verify_and_resolve_library_path() {
         Ok(p) => p,

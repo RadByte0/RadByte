@@ -809,7 +809,12 @@ fn read_properties(raw: &str) -> Result<ServerConfigFile, String> {
         } else {
             key
         };
-        if key.starts_with("auto_update") || key.starts_with("auto-update") {
+        if key.starts_with("auto_update")
+            || key.starts_with("auto-update")
+            || key == "version"
+            || key.starts_with("version-")
+            || key == "minecraft-version"
+        {
             continue;
         }
         let default = defaults
