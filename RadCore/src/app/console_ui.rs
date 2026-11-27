@@ -41,8 +41,8 @@ fn is_container_or_panel() -> bool {
         }
     }
     #[cfg(unix)]
-    if std::path::Path::new("/.dockerenv").exists() {
-        return true;
+    {
+        std::path::Path::new("/.dockerenv").exists()
     }
     #[cfg(not(unix))]
     {
