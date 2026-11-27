@@ -244,8 +244,8 @@ impl ProcessMetricsSampler {
         };
         self.last_wall = now;
         self.last_cpu_ns = cpu_ns;
-        let ram_mbit = (read_process_rss_bytes() as f64 * 8.0) / 1_000_000.0;
-        (cpu_pct, ram_mbit)
+        let ram_mb = read_process_rss_bytes() as f64 / (1024.0 * 1024.0);
+        (cpu_pct, ram_mb)
     }
 }
 
@@ -419,7 +419,7 @@ struct TuiState {
     version: String,
     hint: String,
     cpu_pct: f64,
-    ram_mbit: f64,
+    ram_mb: f64,
     logs: VecDeque<String>,
     input: String,
     scroll_from_bottom: usize,
@@ -499,7 +499,7 @@ impl TuiState {
             &self.version,
             &self.hint,
             self.cpu_pct,
-            self.ram_mbit,
+            self.ram_mb,
             width,
         );
         out.push_str(&format!("\x1b[2K\x1b[38;2;56;56;56m{divider}\x1b[0m\n"));
@@ -607,7 +607,7 @@ fn append_pixel_header(
     version: &str,
     hint: &str,
     cpu_pct: f64,
-    ram_mbit: f64,
+    ram_mb: f64,
     _width: usize,
 ) {
     append_radbyte_logo(out);
@@ -617,7 +617,7 @@ fn append_pixel_header(
         crate::PROTOCOL_VERSION
     ));
     out.push_str(&format!(
-        "\x1b[2K  \x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;232;125;13mCPU {cpu_pct:.1}%\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;245;158;11mRAM {ram_mbit:.1} Mbit\x1b[0m  \x1b[90m•  {hint}  •  Scroll: Mouse/PgUp/PgDn\x1b[0m\n"
+        "\x1b[2K  \x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;232;125;13mCPU {cpu_pct:.1}%\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;245;158;11mRAM {ram_mb:.1} MB\x1b[0m  \x1b[90m•  {hint}  •  Scroll: Mouse/PgUp/PgDn\x1b[0m\n"
     ));
 }
 
@@ -688,7 +688,7 @@ impl ConsoleUi {
             version: version.to_owned(),
             hint: hint.to_owned(),
             cpu_pct: 0.0,
-            ram_mbit: init_ram,
+            ram_mb: init_ram,
             logs: VecDeque::new(),
             input: String::new(),
             scroll_from_bottom: 0,
@@ -745,9 +745,9 @@ impl ConsoleUi {
                     resized = true;
                 }
                 if ticks.is_multiple_of(5) {
-                    let (cpu_pct, ram_mbit) = sampler.sample();
+                    let (cpu_pct, ram_mb) = sampler.sample();
                     st.cpu_pct = cpu_pct;
-                    st.ram_mbit = ram_mbit;
+                    st.ram_mb = ram_mb;
                     changed = true;
                 }
                 if changed {
