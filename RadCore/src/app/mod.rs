@@ -6,4 +6,5 @@ pub mod cli;
 pub mod console_ui;
 pub mod error;
 pub mod radon;
+pub mod setup_ui;
 pub mod text;

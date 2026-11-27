@@ -470,22 +470,51 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
     let mut byte = [0u8; 1];
     let mut esc_seq = Vec::new();
     let mut in_esc = false;
+    let mut last_size = rad_core::console_ui::terminal_size();
 
     loop {
         let filtered = filter_console_releases(&all, &query, show_older);
         if selected_rel_idx >= filtered.len() {
             selected_rel_idx = 0;
         }
-        let (cols, _) = rad_core::console_ui::terminal_size();
-        let width = usize::from(cols);
-        let divider = "─".repeat(width);
+        let size = rad_core::console_ui::terminal_size();
+        let clear = size != last_size;
+        last_size = size;
+        let width = usize::from(size.0).clamp(54, 92);
+        let inner = width - 4;
         let selected_label = filtered.get(selected_rel_idx).map_or_else(
             || "Minecraft 26.3 (latest)".to_owned(),
             |r| format!("Minecraft {}  ({})", r.game_version, r.tag),
         );
 
+        let box_line = |content: &str| {
+            let mut vis = 0usize;
+            let mut chars = content.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' && chars.peek() == Some(&'[') {
+                    let _ = chars.next();
+                    for seq in chars.by_ref() {
+                        if ('@'..='~').contains(&seq) {
+                            break;
+                        }
+                    }
+                } else {
+                    vis += 1;
+                }
+            }
+            let pad = inner.saturating_sub(vis);
+            format!(
+                "\x1b[2K  \x1b[38;2;56;56;56m│\x1b[0m {content}{} \x1b[38;2;56;56;56m│\x1b[0m\n",
+                " ".repeat(pad)
+            )
+        };
+
         let mut out = String::with_capacity(2048);
-        out.push_str("\x1b[H");
+        if clear {
+            out.push_str("\x1b[2J\x1b[3J\x1b[H");
+        } else {
+            out.push_str("\x1b[H");
+        }
         out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █  █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
         out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▀▀▄ █▄▄█   █   █▀▀ \x1b[0m\n");
         out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀ ▄▄▄█   █   █▄▄▄\x1b[0m\n");
@@ -493,7 +522,10 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
         out.push_str(env!("CARGO_PKG_VERSION"));
         out.push_str("\x1b[0m  \x1b[90m•  First-Run Configuration\x1b[0m\n");
         out.push_str("\x1b[2K  \x1b[90m↑/↓ Navigate  •  Space/Enter Toggle  •  / Search  •  Esc Quit\x1b[0m\n");
-        out.push_str(&format!("\x1b[2K\x1b[38;2;56;56;56m{divider}\x1b[0m\n"));
+        out.push_str(&format!(
+            "\x1b[2K  \x1b[38;2;56;56;56m╭{}╮\x1b[0m\n",
+            "─".repeat(inner + 2)
+        ));
 
         let row_marker = |idx: usize| {
             if focused_row == idx {
@@ -503,10 +535,10 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
             }
         };
         let arrow = if dropdown_open { "▲" } else { "▼" };
-        out.push_str(&format!(
-            "\x1b[2K  {} \x1b[1;37mVersion:\x1b[0m               [\x1b[38;2;232;125;13m{arrow}\x1b[0m] {selected_label}\n",
+        out.push_str(&box_line(&format!(
+            "{} \x1b[1;37mVersion:\x1b[0m               [\x1b[38;2;232;125;13m{arrow}\x1b[0m] {selected_label}",
             row_marker(0)
-        ));
+        )));
 
         if dropdown_open {
             let search_hint = if editing_search {
@@ -516,9 +548,9 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
             } else {
                 format!("\x1b[90mFilter: {query} (press / to edit)\x1b[0m")
             };
-            out.push_str(&format!("\x1b[2K       {search_hint}\n"));
+            out.push_str(&box_line(&format!("     {search_hint}")));
             if filtered.is_empty() {
-                out.push_str("\x1b[2K       \x1b[90m(no matching releases)\x1b[0m\n");
+                out.push_str(&box_line("     \x1b[90m(no matching releases)\x1b[0m"));
             } else {
                 let win_start = selected_rel_idx.saturating_sub(4);
                 for (i, rel) in filtered.iter().enumerate().skip(win_start).take(7) {
@@ -527,10 +559,10 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
                     } else {
                         "\x1b[90m○\x1b[0m"
                     };
-                    out.push_str(&format!(
-                        "\x1b[2K       {mark} Minecraft {}  \x1b[90m({})\x1b[0m\n",
+                    out.push_str(&box_line(&format!(
+                        "     {mark} Minecraft {}  \x1b[90m({})\x1b[0m",
                         rel.game_version, rel.tag
-                    ));
+                    )));
                 }
             }
         }
@@ -558,35 +590,38 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
             local_path.clone()
         };
 
-        out.push_str(&format!(
-            "\x1b[2K  {} \x1b[1;37mShow older releases:\x1b[0m   {older_box}\n",
+        out.push_str(&box_line(&format!(
+            "{} \x1b[1;37mShow older releases:\x1b[0m   {older_box}",
             row_marker(1)
-        ));
-        out.push_str(&format!(
-            "\x1b[2K  {} \x1b[1;37mAuto-update all:\x1b[0m       {auto_box} \x1b[90m(launcher, versions, API)\x1b[0m\n",
+        )));
+        out.push_str(&box_line(&format!(
+            "{} \x1b[1;37mAuto-update all:\x1b[0m       {auto_box} \x1b[90m(launcher, versions, API)\x1b[0m",
             row_marker(2)
-        ));
-        out.push_str(&format!(
-            "\x1b[2K  {} \x1b[1;37mMinecraft EULA:\x1b[0m        {eula_box} \x1b[90m(aka.ms/MinecraftEULA)\x1b[0m\n",
+        )));
+        out.push_str(&box_line(&format!(
+            "{} \x1b[1;37mMinecraft EULA:\x1b[0m        {eula_box} \x1b[90m(aka.ms/MinecraftEULA)\x1b[0m",
             row_marker(3)
-        ));
-        out.push_str(&format!(
-            "\x1b[2K  {} \x1b[1;37mLocal data folder:\x1b[0m     {local_disp}\n",
+        )));
+        out.push_str(&box_line(&format!(
+            "{} \x1b[1;37mLocal data folder:\x1b[0m     {local_disp}",
             row_marker(4)
-        ));
-        out.push_str("\x1b[2K\n");
+        )));
+        out.push_str(&box_line(""));
         let btn_style = if focused_row == 5 {
             "\x1b[48;2;232;125;13m\x1b[1;30m  Install & Start Server  \x1b[0m"
         } else {
             "\x1b[38;2;232;125;13m[ Install & Start Server ]\x1b[0m"
         };
-        out.push_str(&format!("\x1b[2K  {} {btn_style}\n", row_marker(5)));
+        out.push_str(&box_line(&format!("{} {btn_style}", row_marker(5))));
         if !notice.is_empty() {
-            out.push_str(&format!(
-                "\x1b[2K  \x1b[38;2;232;125;13m! {notice}\x1b[0m\n"
-            ));
+            out.push_str(&box_line(&format!(
+                "\x1b[38;2;232;125;13m! {notice}\x1b[0m"
+            )));
         }
-        out.push_str("\x1b[J");
+        out.push_str(&format!(
+            "\x1b[2K  \x1b[38;2;56;56;56m╰{}╯\x1b[0m\n\x1b[J",
+            "─".repeat(inner + 2)
+        ));
 
         {
             let mut stdout = std::io::stdout().lock();

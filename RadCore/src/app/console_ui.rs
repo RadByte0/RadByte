@@ -446,7 +446,7 @@ impl TuiState {
         }
     }
 
-    fn render(&self) {
+    fn render(&self, clear_screen: bool) {
         let (cols, rows) = self.last_size;
         let width = usize::from(cols);
         let height = usize::from(rows);
@@ -472,7 +472,11 @@ impl TuiState {
 
         let divider = "─".repeat(width);
         let mut out = String::with_capacity(4096);
-        out.push_str("\x1b[?25l\x1b[H");
+        if clear_screen {
+            out.push_str("\x1b[?25l\x1b[2J\x1b[3J\x1b[H");
+        } else {
+            out.push_str("\x1b[?25l\x1b[H");
+        }
 
         // Header (6 lines)
         append_pixel_header(
@@ -513,8 +517,12 @@ impl TuiState {
             self.input
         ));
         out.push_str(&format!("\x1b[2K\x1b[38;2;56;56;56m{divider}\x1b[0m\n"));
+        let status_line = truncate_plain(
+            &format!("{scroll_badge}{spaces}"),
+            width.saturating_sub(right_len + 1),
+        );
         out.push_str(&format!(
-            "\x1b[2K \x1b[90m{scroll_badge}{spaces}\x1b[38;2;160;160;160m{label}\x1b[0m"
+            "\x1b[2K \x1b[90m{status_line}\x1b[38;2;160;160;160m{label}\x1b[0m"
         ));
 
         // Position cursor at `> <input>`
@@ -526,6 +534,10 @@ impl TuiState {
         let _ = stdout.write_all(out.as_bytes());
         let _ = stdout.flush();
     }
+}
+
+fn truncate_plain(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 fn wrap_ansi_or_plain(line: &str, max_cols: usize, out: &mut Vec<String>) {
@@ -660,7 +672,7 @@ impl ConsoleUi {
             scroll_from_bottom: 0,
             last_size: terminal_size(),
         }));
-        state.lock().unwrap().render();
+        state.lock().unwrap().render(true);
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let cmd_clients: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
@@ -693,6 +705,7 @@ impl ConsoleUi {
             let mut ticks = 0u32;
             while !log_stop.load(Ordering::Relaxed) {
                 let mut changed = false;
+                let mut resized = false;
                 if let Ok((n, _)) = log_sock.recv_from(&mut buf) {
                     let text = String::from_utf8_lossy(&buf[..n]);
                     let mut st = log_state.lock().unwrap();
@@ -707,6 +720,7 @@ impl ConsoleUi {
                 if st.last_size != size {
                     st.last_size = size;
                     changed = true;
+                    resized = true;
                 }
                 if ticks.is_multiple_of(5) {
                     let (cpu_pct, ram_mbit) = sampler.sample();
@@ -715,7 +729,7 @@ impl ConsoleUi {
                     changed = true;
                 }
                 if changed {
-                    st.render();
+                    st.render(resized);
                 }
             }
         });
@@ -743,31 +757,31 @@ impl ConsoleUi {
                                 let mut st = key_state.lock().unwrap();
                                 if esc_seq.starts_with(b"[<64;") {
                                     st.scroll_from_bottom = st.scroll_from_bottom.saturating_add(3);
-                                    st.render();
+                                    st.render(false);
                                 } else if esc_seq.starts_with(b"[<65;") {
                                     st.scroll_from_bottom = st.scroll_from_bottom.saturating_sub(3);
-                                    st.render();
+                                    st.render(false);
                                 } else {
                                     match esc_seq.as_slice() {
                                         b"[5~" => {
                                             st.scroll_from_bottom =
                                                 st.scroll_from_bottom.saturating_add(5);
-                                            st.render();
+                                            st.render(false);
                                         }
                                         b"[6~" => {
                                             st.scroll_from_bottom =
                                                 st.scroll_from_bottom.saturating_sub(5);
-                                            st.render();
+                                            st.render(false);
                                         }
                                         b"[A" if st.input.is_empty() => {
                                             st.scroll_from_bottom =
                                                 st.scroll_from_bottom.saturating_add(1);
-                                            st.render();
+                                            st.render(false);
                                         }
                                         b"[B" if st.input.is_empty() => {
                                             st.scroll_from_bottom =
                                                 st.scroll_from_bottom.saturating_sub(1);
-                                            st.render();
+                                            st.render(false);
                                         }
                                         _ => {}
                                     }
@@ -792,7 +806,7 @@ impl ConsoleUi {
                                             "\x1b[38;2;232;125;13m>\x1b[0m \x1b[1;37m{trimmed}\x1b[0m"
                                         ));
                                     }
-                                    st.render();
+                                    st.render(false);
                                     trimmed
                                 };
                                 if !cmd.is_empty() {
@@ -805,7 +819,7 @@ impl ConsoleUi {
                             0x08 | 0x7f => {
                                 let mut st = key_state.lock().unwrap();
                                 st.input.pop();
-                                st.render();
+                                st.render(false);
                             }
                             0x03 => {
                                 // Ctrl+C: forward `stop` to listeners.
@@ -817,7 +831,7 @@ impl ConsoleUi {
                             b if (0x20..0x7f).contains(&b) => {
                                 let mut st = key_state.lock().unwrap();
                                 st.input.push(b as char);
-                                st.render();
+                                st.render(false);
                             }
                             _ => {}
                         }

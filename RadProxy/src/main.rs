@@ -58,6 +58,10 @@ fn main() {
     }
 
     let cfg_path = resolve_config_path("rad.properties");
+    if let Err(err) = rad_core::setup_ui::ensure_proxy_setup(&cfg_path) {
+        error!(%err, "proxy setup cancelled");
+        exit_with_pause(1);
+    }
     let work_dir = cfg_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

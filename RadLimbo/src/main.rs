@@ -91,6 +91,10 @@ async fn async_main() {
     print_startup_banner("RadLimbo", env!("CARGO_PKG_VERSION"), LIMBO_BANNER);
 
     let cfg_path = resolve_config_path("rad.properties");
+    if let Err(err) = rad_core::setup_ui::ensure_limbo_setup(&cfg_path) {
+        error!(%err, "limbo setup cancelled");
+        exit_with_pause(1);
+    }
     auto_update::run_startup_auto_update(&cfg_path);
     let cfg = match LimboConfig::load_or_create(&cfg_path) {
         Ok(c) => c,
