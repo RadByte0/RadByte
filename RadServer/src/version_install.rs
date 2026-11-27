@@ -151,12 +151,16 @@ fn install_with_source(
     source_label: &str,
     tag_override: Option<&str>,
 ) -> Result<(), String> {
-    let selection = versions.join("version.toml");
-    if selection.exists() {
-        let selected = crate::version_selection::load(versions)?;
+    let rad_cfg_path = versions
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("rad.properties");
+    if rad_cfg_path.exists() || versions.join("version.toml").exists() {
+        let selected = crate::version_selection::load(&rad_cfg_path, versions)?;
         if selected != "26.3" {
             return Err(format!(
-                "The existing version.toml selects {selected}. Change it to 26.3 before installing."
+                "The existing version config selects {selected}. Change it to 26.3 before installing."
             ));
         }
     }
@@ -317,36 +321,8 @@ fn install_with_source(
         package
             .verify_and_resolve_library_path()
             .map_err(|e| e.to_string())?;
-        let mut created_selection = false;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&selection)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                if let Err(e) = file.write_all(b"version = \"26.3\"\n") {
-                    drop(file);
-                    let _ = std::fs::remove_file(&selection);
-                    return Err(e.to_string());
-                }
-                created_selection = true;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if crate::version_selection::load(versions)? != "26.3" {
-                    return Err(
-                        "version.toml changed while installing; no package was installed".into(),
-                    );
-                }
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-        if let Err(e) = std::fs::rename(&stage, &destination) {
-            if created_selection {
-                let _ = std::fs::remove_file(&selection);
-            }
-            return Err(e.to_string());
-        }
+        crate::version_selection::write_version(&rad_cfg_path, "26.3")?;
+        std::fs::rename(&stage, &destination).map_err(|e| e.to_string())?;
         Ok(())
     })();
     if stage.exists() {

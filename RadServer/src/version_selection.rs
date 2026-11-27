@@ -1,37 +1,35 @@
-//! User-selected Minecraft version in `versions/version.toml`.
+//! User-selected Minecraft version in `rad.properties` (with legacy `versions/version.toml` fallback).
 
-use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 use serde::Deserialize;
 
-const DEFAULT_CONFIG: &str = "# Minecraft version supported by this RadServer build.\n# Use a quoted version number; only installed and supported versions can run.\nversion = \"26.3\"\n";
+const DEFAULT_VERSION: &str = "26.3";
 const MAX_CONFIG_BYTES: u64 = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VersionSelection {
+struct LegacyVersionSelection {
     version: String,
 }
 
-/// Reads the selected version, creating a default config for existing installations.
-pub fn load(versions_dir: &Path) -> Result<String, String> {
-    let path = versions_dir.join("version.toml");
-    // Do not manufacture an empty versions directory when the package is missing.
-    if versions_dir.is_dir() {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => file
-                .write_all(DEFAULT_CONFIG.as_bytes())
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))?,
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(format!("cannot create {}: {e}", path.display())),
-        }
+fn validate_version(version: &str, source: &Path) -> Result<String, String> {
+    let parts: Vec<_> = version.split('.').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(format!(
+            "invalid version '{version}' in {}: use a numeric version like \"26.3\"",
+            source.display()
+        ));
     }
-    let symlink_meta = std::fs::symlink_metadata(&path)
+    Ok(version.to_owned())
+}
+
+fn read_checked_file(path: &Path) -> Result<String, String> {
+    let symlink_meta = std::fs::symlink_metadata(path)
         .map_err(|e| format!("cannot access {}: {e}", path.display()))?;
     if symlink_meta.file_type().is_symlink() {
         return Err(format!("{} must not be a symlink", path.display()));
@@ -42,23 +40,90 @@ pub fn load(versions_dir: &Path) -> Result<String, String> {
             path.display()
         ));
     }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let config: VersionSelection = toml::from_str(raw.trim_start_matches('\u{feff}'))
-        .map_err(|e| format!("invalid {}: {e}; use version = \"26.3\"", path.display()))?;
-    let parts: Vec<_> = config.version.split('.').collect();
-    if !(2..=3).contains(&parts.len())
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()))
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+fn parse_rad_properties_version(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim();
+            if key.eq_ignore_ascii_case("version") || key.eq_ignore_ascii_case("minecraft-version")
+            {
+                return Some(v.trim().trim_matches('"').trim_matches('\'').to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Persists `version=<ver>` in `rad_cfg_path` (`rad.properties`), preserving existing lines.
+pub fn write_version(rad_cfg_path: &Path, version: &str) -> Result<(), String> {
+    let existing = std::fs::read_to_string(rad_cfg_path).unwrap_or_default();
+    let mut lines: Vec<String> = Vec::new();
+    let mut updated = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('#')
+            && let Some((k, _)) = trimmed.split_once('=')
+            && (k.trim().eq_ignore_ascii_case("version")
+                || k.trim().eq_ignore_ascii_case("minecraft-version"))
+        {
+            lines.push(format!("version={version}"));
+            updated = true;
+            continue;
+        }
+        lines.push(line.to_owned());
+    }
+    if !updated {
+        lines.push(format!("version={version}"));
+    }
+    if let Some(parent) = rad_cfg_path.parent()
+        && !parent.as_os_str().is_empty()
     {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create dir: {e}"))?;
+    }
+    let mut content = lines.join("\n");
+    content.push('\n');
+    std::fs::write(rad_cfg_path, content)
+        .map_err(|e| format!("cannot write {}: {e}", rad_cfg_path.display()))
+}
+
+/// Reads the selected version from `rad.properties` (or legacy `versions/version.toml`),
+/// writing `version=26.3` into `rad.properties` for new/existing installations.
+pub fn load(rad_cfg_path: &Path, versions_dir: &Path) -> Result<String, String> {
+    if rad_cfg_path.exists() {
+        let raw = read_checked_file(rad_cfg_path)?;
+        if let Some(ver) = parse_rad_properties_version(&raw) {
+            return validate_version(&ver, rad_cfg_path);
+        }
+    }
+
+    let legacy_toml = versions_dir.join("version.toml");
+    if legacy_toml.exists() {
+        let raw = read_checked_file(&legacy_toml)?;
+        let config: LegacyVersionSelection = toml::from_str(raw.trim_start_matches('\u{feff}'))
+            .map_err(|e| {
+                format!(
+                    "invalid {}: {e}; use version = \"26.3\"",
+                    legacy_toml.display()
+                )
+            })?;
+        return validate_version(&config.version, &legacy_toml);
+    }
+
+    if !versions_dir.is_dir() {
         return Err(format!(
-            "invalid version '{}' in {}: use a numeric version like \"26.3\"",
-            config.version,
-            path.display()
+            "cannot access {} (missing versions directory)",
+            versions_dir.display()
         ));
     }
-    Ok(config.version)
+
+    write_version(rad_cfg_path, DEFAULT_VERSION)?;
+    Ok(DEFAULT_VERSION.to_owned())
 }
 
 #[cfg(test)]
@@ -66,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn creates_default_and_rejects_invalid_version_configs() {
+    fn creates_default_in_rad_properties_and_rejects_invalid_versions() {
         let dir = std::env::temp_dir().join(format!(
             "rad-version-select-{}-{}",
             std::process::id(),
@@ -75,24 +140,27 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(load(&dir).unwrap(), "26.3");
-        let path = dir.join("version.toml");
-        std::fs::write(&path, "version = \"26.4\"\n").unwrap();
-        assert_eq!(load(&dir).unwrap(), "26.4");
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "version = \"26.4\"\n"
+        let versions_dir = dir.join("versions");
+        std::fs::create_dir_all(&versions_dir).unwrap();
+        let rad_cfg = dir.join("rad.properties");
+
+        assert_eq!(load(&rad_cfg, &versions_dir).unwrap(), "26.3");
+        assert!(
+            std::fs::read_to_string(&rad_cfg)
+                .unwrap()
+                .contains("version=26.3")
         );
+
+        std::fs::write(&rad_cfg, "auto-update=true\nversion=26.4\n").unwrap();
+        assert_eq!(load(&rad_cfg, &versions_dir).unwrap(), "26.4");
+
         for raw in [
-            "version = \"../26.3\"",
-            "version = \"26.3/../../etc\"",
-            "version = 26.3",
-            "version = \"26.3\"\nextra = true",
-            "version = \"\"",
+            "version=../26.3\n",
+            "version=26.3/../../etc\n",
+            "version=\n",
         ] {
-            std::fs::write(&path, raw).unwrap();
-            assert!(load(&dir).is_err(), "accepted {raw}");
+            std::fs::write(&rad_cfg, raw).unwrap();
+            assert!(load(&rad_cfg, &versions_dir).is_err(), "accepted {raw}");
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

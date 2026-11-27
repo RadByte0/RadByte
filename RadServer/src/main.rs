@@ -67,7 +67,7 @@ fn main() {
 
     let _console_ui = ConsoleUi::start("RadServer", env!("CARGO_PKG_VERSION"), "help, op, stop");
 
-    let selected_version = match version_selection::load(&versions_dir) {
+    let selected_version = match version_selection::load(&rad_cfg_path, &versions_dir) {
         Ok(version) => version,
         Err(e) => {
             error!(error = %e, "failed to select Minecraft version");
