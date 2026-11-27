@@ -5,6 +5,7 @@ pub mod auto_update;
 pub mod cli;
 pub mod console_ui;
 pub mod error;
+pub mod i18n;
 pub mod radon;
 pub mod setup_ui;
 pub mod text;

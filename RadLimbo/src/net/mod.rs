@@ -410,6 +410,7 @@ async fn run_configuration(
     }
 
     // Drain ClientInformation / PluginMessages until AcknowledgeFinishConfiguration.
+    let mut detected_lang = rad_core::i18n::ClientLang::En;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -424,7 +425,12 @@ async fn run_configuration(
             Ok(Some(frame)) => frame,
             _ => return false,
         };
-        if frame.id == AcknowledgeFinishConfiguration::ID {
+        if frame.id == 0x00
+            && let Some(loc) = rad_core::i18n::decode_client_locale(&frame.payload)
+        {
+            detected_lang = rad_core::i18n::ClientLang::from_locale(&loc);
+        } else if frame.id == AcknowledgeFinishConfiguration::ID {
+            let _ = detected_lang;
             return true;
         }
     }
@@ -546,6 +552,8 @@ async fn run_play(
     let ka_timeout = cfg.keep_alive_interval.saturating_mul(2);
     let mut keep_alive_seq: i64 = 1;
     let mut pending_ka: Option<(i64, tokio::time::Instant)> = None;
+    let mut detected_lang = rad_core::i18n::ClientLang::En;
+    let mut lang_override: Option<rad_core::i18n::ClientLang> = None;
 
     loop {
         let ka_deadline = async {
@@ -596,11 +604,57 @@ async fn run_play(
                     }
                 } else if frame.id == ConfirmTeleportation::ID {
                     let _ = frame.decode_as::<ConfirmTeleportation>();
+                } else if frame.id == 0x0E
+                    && let Some(loc) = rad_core::i18n::decode_client_locale(&frame.payload)
+                {
+                    detected_lang = rad_core::i18n::ClientLang::from_locale(&loc);
                 } else if frame.id == ChatCommand::ID
                     && let Ok(cmd) = frame.decode_as::<ChatCommand>()
                 {
                     let trimmed = cmd.command.trim();
-                    if (trimmed.eq_ignore_ascii_case("lobby") || trimmed.eq_ignore_ascii_case("hub"))
+                    let cur_lang = lang_override.unwrap_or(detected_lang);
+                    if trimmed == "lang" || trimmed.starts_with("lang ") {
+                        let arg = trimmed.strip_prefix("lang").unwrap_or("").trim();
+                        let reply = if arg.is_empty() {
+                            rad_core::i18n::translate(
+                                cur_lang,
+                                rad_core::i18n::ClientMsg::LangCurrent(cur_lang),
+                            )
+                        } else if arg.eq_ignore_ascii_case("auto") {
+                            lang_override = None;
+                            rad_core::i18n::translate(
+                                detected_lang,
+                                rad_core::i18n::ClientMsg::LangAuto(detected_lang),
+                            )
+                        } else if let Some(new_lang) = rad_core::i18n::ClientLang::from_code(arg) {
+                            lang_override = Some(new_lang);
+                            rad_core::i18n::translate(
+                                new_lang,
+                                rad_core::i18n::ClientMsg::LangSet(new_lang),
+                            )
+                        } else {
+                            rad_core::i18n::translate(cur_lang, rad_core::i18n::ClientMsg::LangUsage)
+                        };
+                        let chat = rad_core::packet::play::SystemChatMessage {
+                            content: rad_core::nbt::NbtTag::String(reply),
+                            overlay: false,
+                        };
+                        if send_packet(stream, &chat).await.is_err() {
+                            break;
+                        }
+                    } else if trimmed.eq_ignore_ascii_case("help") {
+                        let chat = rad_core::packet::play::SystemChatMessage {
+                            content: rad_core::nbt::NbtTag::String(rad_core::i18n::translate(
+                                cur_lang,
+                                rad_core::i18n::ClientMsg::LimboHelp,
+                            )),
+                            overlay: false,
+                        };
+                        if send_packet(stream, &chat).await.is_err() {
+                            break;
+                        }
+                    } else if (trimmed.eq_ignore_ascii_case("lobby")
+                        || trimmed.eq_ignore_ascii_case("hub"))
                         && let Some(ref target) = cfg.reconnect_server
                     {
                         let mut data = BytesMut::new();

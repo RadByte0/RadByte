@@ -753,6 +753,10 @@ pub(super) async fn run_play(
         } else if frame.id == 0x0E
             && let Some(vd) = decode_client_view_distance(&frame.payload)
         {
+            if let Some(loc) = rad_core::i18n::decode_client_locale(&frame.payload) {
+                let detected = rad_core::i18n::ClientLang::from_locale(&loc);
+                let _ = detected;
+            }
             let new_vd = vd.clamp(2, cfg.view_distance);
             if new_vd != effective_view_distance {
                 effective_view_distance = new_vd;
@@ -1802,7 +1806,31 @@ pub(super) async fn run_play(
         } else if frame.id == ChatCommand::ID
             && let Ok(cmd) = frame.decode_as::<ChatCommand>()
         {
-            handle_server_command(&state, &tx, &username, &cmd.command, Some(&inventory)).await;
+            let trimmed = cmd.command.trim();
+            if trimmed == "lang" || trimmed.starts_with("lang ") {
+                let arg = trimmed.strip_prefix("lang").unwrap_or("").trim();
+                let cur = rad_core::i18n::ClientLang::En;
+                let reply = if arg.is_empty() {
+                    rad_core::i18n::translate(cur, rad_core::i18n::ClientMsg::LangCurrent(cur))
+                } else if arg.eq_ignore_ascii_case("auto") {
+                    rad_core::i18n::translate(cur, rad_core::i18n::ClientMsg::LangAuto(cur))
+                } else if let Some(new_lang) = rad_core::i18n::ClientLang::from_code(arg) {
+                    rad_core::i18n::translate(
+                        new_lang,
+                        rad_core::i18n::ClientMsg::LangSet(new_lang),
+                    )
+                } else {
+                    rad_core::i18n::translate(cur, rad_core::i18n::ClientMsg::LangUsage)
+                };
+                if let Ok(bytes) = encode_to_bytes(&rad_core::packet::play::SystemChatMessage {
+                    content: rad_core::nbt::NbtTag::String(reply),
+                    overlay: false,
+                }) {
+                    let _ = tx.try_send(bytes);
+                }
+            } else {
+                handle_server_command(&state, &tx, &username, &cmd.command, Some(&inventory)).await;
+            }
         } else if frame.id == 0x08
             && let Ok(command) = {
                 use rad_core::types::Decode as _;

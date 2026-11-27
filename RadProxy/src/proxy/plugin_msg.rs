@@ -134,6 +134,17 @@ pub fn build_proxy_declare_commands(is_admin: bool) -> DeclareCommands {
     nodes[0].children.push(VarInt(glist_idx));
     nodes.push(CommandNode::literal("glist", true, vec![]));
 
+    // /lang [code]
+    let lang_idx = nodes.len() as i32;
+    let lang_arg_idx = lang_idx + 1;
+    nodes[0].children.push(VarInt(lang_idx));
+    nodes.push(CommandNode::literal(
+        "lang",
+        true,
+        vec![VarInt(lang_arg_idx)],
+    ));
+    nodes.push(CommandNode::word_arg("code", true, vec![], None));
+
     if is_admin {
         for (cmd, arg) in [
             ("find", "player"),
@@ -276,10 +287,10 @@ mod tests {
     #[test]
     fn builds_admin_and_player_command_trees() {
         let player_tree = build_proxy_declare_commands(false);
-        assert_eq!(player_tree.nodes[0].children.len(), 2);
+        assert_eq!(player_tree.nodes[0].children.len(), 3);
 
         let admin_tree = build_proxy_declare_commands(true);
-        assert_eq!(admin_tree.nodes[0].children.len(), 7);
+        assert_eq!(admin_tree.nodes[0].children.len(), 8);
     }
 
     #[test]
@@ -303,7 +314,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(root_names, vec!["help", "server", "glist"]);
+        assert_eq!(root_names, vec!["help", "server", "glist", "lang"]);
         // Colliding backend "server" was replaced by proxy's "server" with its `name` argument child.
         let server_idx = merged.nodes[0].children[1].0 as usize;
         assert_eq!(merged.nodes[server_idx].children.len(), 1);

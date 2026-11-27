@@ -22,6 +22,7 @@ pub(super) async fn proxy_with_server_switch(
     current_server: Option<&str>,
     control_rx: &mut mpsc::UnboundedReceiver<PlayerControl>,
     last_pos: &mut PlayerHoldPos,
+    player_lang: &mut PlayerLocaleState,
     cfg: &ProxyConfig,
 ) -> ProxyExit {
     let is_admin = cfg.admins.contains(&username.to_ascii_lowercase());
@@ -43,6 +44,7 @@ pub(super) async fn proxy_with_server_switch(
             username,
             current_server,
             last_pos,
+            player_lang,
             cfg,
         )
         .await
@@ -124,6 +126,7 @@ pub(super) async fn proxy_with_server_switch(
                     username,
                     current_server,
                     last_pos,
+                    player_lang,
                     cfg,
                 )
                 .await
@@ -178,6 +181,7 @@ async fn process_client_buf(
     username: &str,
     current_server: Option<&str>,
     last_pos: &mut PlayerHoldPos,
+    player_lang: &mut PlayerLocaleState,
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
@@ -193,6 +197,13 @@ async fn process_client_buf(
         let Ok(pkt) = decode_raw_frame_slice(frame, cfg.max_packet_size, client_compression) else {
             return Err(ProxyExit::Closed);
         };
+
+        if ((*client_state == WireState::Configuration && pkt.id == 0x00)
+            || (*client_state == WireState::Play && pkt.id == 0x0E))
+            && let Some(locale) = rad_core::i18n::decode_client_locale(&pkt.payload)
+        {
+            player_lang.detected = rad_core::i18n::ClientLang::from_locale(&locale);
+        }
 
         if *client_state == WireState::Play {
             if pkt.id == MovePlayerPos::ID
@@ -247,6 +258,7 @@ async fn process_client_buf(
                 state,
                 username,
                 current_server,
+                player_lang,
                 cfg,
             )
             .await
@@ -326,8 +338,11 @@ async fn handle_proxy_command(
     state: &ProxyState,
     username: &str,
     current_server: Option<&str>,
+    player_lang: &mut PlayerLocaleState,
     cfg: &ProxyConfig,
 ) -> Option<ProxyExit> {
+    use rad_core::i18n::{ClientLang, ClientMsg, translate};
+    let lang = player_lang.effective();
     match cmd {
         ProxyCommand::ServerSwitch(target_name) => {
             let target_owned = target_name.to_owned();
@@ -348,7 +363,7 @@ async fn handle_proxy_command(
                 return Some(ProxyExit::Closed);
             }
             let msg = if state.resolve_named_target(&target_owned, cfg).is_some() {
-                format!("You do not have permission to join '{target_owned}'.")
+                translate(lang, ClientMsg::NoServerPermission(&target_owned))
             } else {
                 format_unknown_server_message(&target_owned, cfg)
             };
@@ -380,14 +395,17 @@ async fn handle_proxy_command(
         ProxyCommand::Find(target_player) => {
             let target_owned = target_player.to_owned();
             let msg = if !is_admin {
-                "You do not have permission to use /find.".to_owned()
+                translate(lang, ClientMsg::NoPermission("/find"))
             } else if let Some((name, srv)) = state.find_player(&target_owned) {
-                format!(
-                    "{name} is currently on {}.",
-                    srv.as_deref().unwrap_or("unknown")
+                translate(
+                    lang,
+                    ClientMsg::PlayerOnServer {
+                        player: &name,
+                        server: srv.as_deref().unwrap_or("unknown"),
+                    },
                 )
             } else {
-                format!("Player '{target_owned}' is not online.")
+                translate(lang, ClientMsg::PlayerNotOnline(&target_owned))
             };
             if send_system_chat(client, client_compression, msg)
                 .await
@@ -400,15 +418,27 @@ async fn handle_proxy_command(
             let target_owned = target.to_owned();
             let server_owned = server.to_owned();
             let msg = if !is_admin {
-                "You do not have permission to use /send.".to_owned()
+                translate(lang, ClientMsg::NoPermission("/send"))
             } else if let Some(&addr) = cfg.servers.get(&server_owned) {
                 if target_owned.eq_ignore_ascii_case("all") {
                     let count = state.send_all(&server_owned, addr);
-                    format!("Sent {count} player(s) to {server_owned}.")
+                    translate(
+                        lang,
+                        ClientMsg::SentMany {
+                            count,
+                            server: &server_owned,
+                        },
+                    )
                 } else if state.send_player(&target_owned, &server_owned, addr) {
-                    format!("Sent {target_owned} to {server_owned}.")
+                    translate(
+                        lang,
+                        ClientMsg::SentOne {
+                            player: &target_owned,
+                            server: &server_owned,
+                        },
+                    )
                 } else {
-                    format!("Player '{target_owned}' is not online.")
+                    translate(lang, ClientMsg::PlayerNotOnline(&target_owned))
                 }
             } else {
                 format_unknown_server_message(&server_owned, cfg)
@@ -425,7 +455,7 @@ async fn handle_proxy_command(
                 if send_system_chat(
                     client,
                     client_compression,
-                    "You do not have permission to use /alert.".into(),
+                    translate(lang, ClientMsg::NoPermission("/alert")),
                 )
                 .await
                 .is_err()
@@ -438,11 +468,17 @@ async fn handle_proxy_command(
         }
         ProxyCommand::Kick { target, reason } => {
             let msg = if !is_admin {
-                "You do not have permission to use /kick.".to_owned()
+                translate(lang, ClientMsg::NoPermission("/kick"))
             } else if state.kick_player(target, reason) {
-                format!("Kicked {target}: {reason}")
+                translate(
+                    lang,
+                    ClientMsg::KickedPlayer {
+                        player: target,
+                        reason,
+                    },
+                )
             } else {
-                format!("Player '{target}' is not online.")
+                translate(lang, ClientMsg::PlayerNotOnline(target))
             };
             if send_system_chat(client, client_compression, msg)
                 .await
@@ -453,10 +489,10 @@ async fn handle_proxy_command(
         }
         ProxyCommand::RadProxy(subcmd) => {
             let msg = if !is_admin {
-                "You do not have permission to use /radproxy.".to_owned()
+                translate(lang, ClientMsg::NoPermission("/radproxy"))
             } else if subcmd.eq_ignore_ascii_case("reload") {
                 match state.reload_current() {
-                    Ok(radons) => format!("Reloaded proxy config ({radons} radons active)."),
+                    Ok(radons) => translate(lang, ClientMsg::Reloaded(radons)),
                     Err(err) => format!("Failed to reload proxy config: {err}"),
                 }
             } else {
@@ -467,6 +503,26 @@ async fn handle_proxy_command(
                     snap.total_connections,
                     snap.server_switches
                 )
+            };
+            if send_system_chat(client, client_compression, msg)
+                .await
+                .is_err()
+            {
+                return Some(ProxyExit::Closed);
+            }
+        }
+        ProxyCommand::Lang(arg) => {
+            let msg = if arg.is_empty() {
+                translate(lang, ClientMsg::LangCurrent(lang))
+            } else if arg.eq_ignore_ascii_case("auto") {
+                player_lang.override_lang = None;
+                let detected = player_lang.detected;
+                translate(detected, ClientMsg::LangAuto(detected))
+            } else if let Some(new_lang) = ClientLang::from_code(arg) {
+                player_lang.override_lang = Some(new_lang);
+                translate(new_lang, ClientMsg::LangSet(new_lang))
+            } else {
+                translate(lang, ClientMsg::LangUsage)
             };
             if send_system_chat(client, client_compression, msg)
                 .await
@@ -975,6 +1031,12 @@ pub(super) fn parse_proxy_command_payload(mut slice: &[u8]) -> Option<ProxyComma
                 reason: "Kicked by an administrator.",
             });
         }
+    }
+    if cmd == "lang" {
+        return Some(ProxyCommand::Lang(""));
+    }
+    if let Some(arg) = cmd.strip_prefix("lang ") {
+        return Some(ProxyCommand::Lang(arg.trim()));
     }
     if cmd == "radproxy" {
         return Some(ProxyCommand::RadProxy("info"));

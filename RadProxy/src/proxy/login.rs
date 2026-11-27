@@ -136,6 +136,7 @@ pub(super) async fn handle_login(
     let mut client_state = WireState::Login;
     let mut client_compression: Option<CompressionConfig> = None;
     let mut last_pos = PlayerHoldPos::default();
+    let mut player_lang = PlayerLocaleState::default();
     let mut preconnected_backend: Option<TcpStream> = None;
 
     loop {
@@ -224,6 +225,7 @@ pub(super) async fn handle_login(
             current_server.as_deref(),
             &mut control_rx,
             &mut last_pos,
+            &mut player_lang,
             cfg,
         )
         .await;
@@ -268,7 +270,10 @@ pub(super) async fn handle_login(
                         HoldResult::Reconnected(stream) => {
                             preconnected_backend = Some(stream);
                             client_state = WireState::Configuration;
-                            pending_chat = Some("Reconnected to restarted server.".to_owned());
+                            pending_chat = Some(rad_core::i18n::translate(
+                                player_lang.effective(),
+                                rad_core::i18n::ClientMsg::Reconnected,
+                            ));
                             continue;
                         }
                         HoldResult::ClientClosed => break,
@@ -337,6 +342,19 @@ pub(super) async fn handle_login(
     state.online_players.fetch_sub(1, Ordering::Relaxed);
     if cfg.log_player_connections {
         info!(%peer_addr, username = %identity.username, "player disconnected");
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct PlayerLocaleState {
+    pub detected: rad_core::i18n::ClientLang,
+    pub override_lang: Option<rad_core::i18n::ClientLang>,
+}
+
+impl PlayerLocaleState {
+    #[must_use]
+    pub fn effective(&self) -> rad_core::i18n::ClientLang {
+        self.override_lang.unwrap_or(self.detected)
     }
 }
 
@@ -532,6 +550,7 @@ pub(super) enum ProxyCommand<'a> {
     Alert(&'a str),
     Kick { target: &'a str, reason: &'a str },
     RadProxy(&'a str),
+    Lang(&'a str),
 }
 
 /// Performs `EncryptionRequest` / `EncryptionResponse` + Mojang `hasJoined` verification
