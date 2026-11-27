@@ -591,6 +591,13 @@ fn wrap_ansi_or_plain(line: &str, max_cols: usize, out: &mut Vec<String>) {
     }
 }
 
+/// Appends the 3-line orange Antigravity-style `RADBYTE` pixel-art logo to `out`.
+pub fn append_radbyte_logo(out: &mut String) {
+    out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █   █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▄▄▀  ▀▄▀    █   █▀▀ \x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀   █     █   █▄▄▄\x1b[0m\n");
+}
+
 fn append_pixel_header(
     out: &mut String,
     product: &str,
@@ -600,9 +607,7 @@ fn append_pixel_header(
     ram_mbit: f64,
     _width: usize,
 ) {
-    out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █  █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
-    out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▀▀▄ █▄▄█   █   █▀▀ \x1b[0m\n");
-    out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀ ▄▄▄█   █   █▄▄▄\x1b[0m\n");
+    append_radbyte_logo(out);
     out.push_str(&format!(
         "\x1b[2K  \x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m  \x1b[90m•  Minecraft {} (protocol {})\x1b[0m\n",
         crate::MINECRAFT_VERSION,

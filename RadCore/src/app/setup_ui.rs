@@ -7,7 +7,7 @@ use crate::auto_update::{
     AutoUpdateSettings, MAX_AUTO_UPDATE_INTERVAL_MINUTES, MIN_AUTO_UPDATE_INTERVAL_MINUTES,
     load_auto_update_settings, save_auto_update_settings,
 };
-use crate::console_ui::{RawTerminalGuard, is_interactive_tty, terminal_size};
+use crate::console_ui::{RawTerminalGuard, append_radbyte_logo, is_interactive_tty, terminal_size};
 
 const FORWARDING_MODES: [&str; 4] = ["none", "modern", "bungeeguard", "legacy"];
 const INTERVAL_PRESETS: [u64; 8] = [1, 5, 10, 15, 30, 60, 120, 1440];
@@ -30,12 +30,19 @@ pub struct AutoUpdateMenu {
     pub include_radapi: bool,
     /// Whether to show the `Update versions` toggle.
     pub include_versions: bool,
+    /// Label column width for aligning with surrounding rows.
+    pub label_width: usize,
 }
 
 impl AutoUpdateMenu {
     /// Creates an `AutoUpdateMenu` initialized from `cfg_path`.
     #[must_use]
-    pub fn load(cfg_path: &Path, include_radapi: bool, include_versions: bool) -> Self {
+    pub fn load(
+        cfg_path: &Path,
+        include_radapi: bool,
+        include_versions: bool,
+        label_width: usize,
+    ) -> Self {
         let settings = load_auto_update_settings(cfg_path);
         Self {
             open: false,
@@ -46,6 +53,7 @@ impl AutoUpdateMenu {
             settings,
             include_radapi,
             include_versions,
+            label_width,
         }
     }
 
@@ -57,9 +65,11 @@ impl AutoUpdateMenu {
     #[must_use]
     pub fn main_row(&self, focused: bool) -> String {
         let arrow = if self.open { "▲" } else { "▼" };
+        let w = self.label_width;
         format!(
-            "{} \x1b[1;37mAuto-update:\x1b[0m       {}  [\x1b[38;2;232;125;13m{arrow}\x1b[0m] \x1b[90m({}m, → details)\x1b[0m",
+            "{} \x1b[1;37m{:<w$}\x1b[0m {}  [\x1b[38;2;232;125;13m{arrow}\x1b[0m] \x1b[90m({}m, → details)\x1b[0m",
             marker(focused && !self.in_sub),
+            "Auto-update:",
             checkbox(self.settings.enabled),
             self.settings.interval_minutes
         )
@@ -76,6 +86,7 @@ impl AutoUpdateMenu {
             return;
         }
         let sub_mark = |idx: usize| marker(focused && self.in_sub && self.sub_idx == idx);
+        let sw = self.label_width.saturating_sub(3);
         let interval_disp = if self.editing_interval {
             format!("\x1b[38;2;232;125;13m{}_\x1b[0m min", self.interval_buf)
         } else {
@@ -85,32 +96,37 @@ impl AutoUpdateMenu {
             )
         };
         out.push_str(&line_fn(&format!(
-            "   {} \x1b[1;37mCheck interval:\x1b[0m    {interval_disp}",
-            sub_mark(0)
+            "   {} \x1b[1;37m{:<sw$}\x1b[0m {interval_disp}",
+            sub_mark(0),
+            "Check interval:"
         )));
         out.push_str(&line_fn(&format!(
-            "   {} \x1b[1;37mUpdate launcher:\x1b[0m   {}",
+            "   {} \x1b[1;37m{:<sw$}\x1b[0m {}",
             sub_mark(1),
+            "Update launcher:",
             checkbox(self.settings.launcher)
         )));
         out.push_str(&line_fn(&format!(
-            "   {} \x1b[1;37mCheck Radons (GH):\x1b[0m {}",
+            "   {} \x1b[1;37m{:<sw$}\x1b[0m {}",
             sub_mark(2),
+            "Check Radons (GH):",
             checkbox(self.settings.radons)
         )));
         let mut idx = 3usize;
         if self.include_radapi {
             out.push_str(&line_fn(&format!(
-                "   {} \x1b[1;37mUpdate RadAPI:\x1b[0m     {}",
+                "   {} \x1b[1;37m{:<sw$}\x1b[0m {}",
                 sub_mark(idx),
+                "Update RadAPI:",
                 checkbox(self.settings.radapi)
             )));
             idx += 1;
         }
         if self.include_versions {
             out.push_str(&line_fn(&format!(
-                "   {} \x1b[1;37mUpdate versions:\x1b[0m   {}",
+                "   {} \x1b[1;37m{:<sw$}\x1b[0m {}",
                 sub_mark(idx),
+                "Update versions:",
                 checkbox(self.settings.versions)
             )));
         }
@@ -258,7 +274,7 @@ pub fn ensure_proxy_setup(cfg_path: &Path) -> Result<(), String> {
     let mut backend = "127.0.0.1:25567".to_owned();
     let mut fwd_idx = 0usize;
     let mut fwd_open = false;
-    let mut auto_menu = AutoUpdateMenu::load(cfg_path, true, false);
+    let mut auto_menu = AutoUpdateMenu::load(cfg_path, true, false, 17);
     let mut focused = 0usize; // 0=ip, 1=port, 2=backend, 3=fwd, 4=auto_update, 5=save
     let mut editing: Option<usize> = None;
 
@@ -433,7 +449,7 @@ pub fn ensure_limbo_setup(cfg_path: &Path) -> Result<(), String> {
     let mut port = "25566".to_owned();
     let mut fwd_idx = 0usize;
     let mut fwd_open = false;
-    let mut auto_menu = AutoUpdateMenu::load(cfg_path, false, false);
+    let mut auto_menu = AutoUpdateMenu::load(cfg_path, false, false, 17);
     let mut focused = 0usize; // 0=ip, 1=port, 2=fwd, 3=auto_update, 4=save
     let mut editing: Option<usize> = None;
 
@@ -655,9 +671,7 @@ impl Drop for SetupScreen {
 }
 
 fn append_setup_banner(out: &mut String, title: &str, version: &str, _width: usize) {
-    out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █  █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
-    out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▀▀▄ █▄▄█   █   █▀▀ \x1b[0m\n");
-    out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀ ▄▄▄█   █   █▄▄▄\x1b[0m\n");
+    append_radbyte_logo(out);
     out.push_str(&format!(
         "\x1b[2K  \x1b[1;37m{title}\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m  \x1b[90m•  ↑/↓ Navigate  •  Space/Enter Edit/Toggle  •  Esc Quit\x1b[0m\n"
     ));

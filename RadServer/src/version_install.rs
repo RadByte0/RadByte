@@ -438,7 +438,7 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
     };
     let cfg_path = work_dir.join("rad.properties");
     let eula_path = work_dir.join("eula.txt");
-    let mut auto_menu = rad_core::setup_ui::AutoUpdateMenu::load(&cfg_path, true, true);
+    let mut auto_menu = rad_core::setup_ui::AutoUpdateMenu::load(&cfg_path, true, true, 22);
     let mut eula_ok =
         is_eula_file_accepted(&eula_path) || std::env::args().skip(1).any(|a| a == "--accept-eula");
     let mut show_older = false;
@@ -515,9 +515,7 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
         } else {
             out.push_str("\x1b[H");
         }
-        out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █  █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
-        out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▀▀▄ █▄▄█   █   █▀▀ \x1b[0m\n");
-        out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀ ▄▄▄█   █   █▄▄▄\x1b[0m\n");
+        rad_core::console_ui::append_radbyte_logo(&mut out);
         out.push_str("\x1b[2K  \x1b[1;37mRadServer Setup\x1b[0m \x1b[38;2;232;125;13mv");
         out.push_str(env!("CARGO_PKG_VERSION"));
         out.push_str("\x1b[0m  \x1b[90m•  First-Run Configuration\x1b[0m\n");
