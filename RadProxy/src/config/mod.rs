@@ -991,6 +991,7 @@ fn read_proxy_properties(raw: &str) -> std::result::Result<ProxyConfigFile, Stri
                     Some(val.to_owned())
                 };
             }
+            k if k.starts_with("auto-update") || k.starts_with("auto_update") => {}
             other => {
                 return Err(format!("line {}: unknown property '{other}'", idx + 1));
             }

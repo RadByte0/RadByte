@@ -343,6 +343,7 @@ fn read_limbo_properties(raw: &str) -> Result<LimboConfigFile, String> {
                     .parse()
                     .map_err(|_| format!("line {}: invalid max-packet-size", idx + 1))?;
             }
+            k if k.starts_with("auto-update") || k.starts_with("auto_update") => {}
             other => {
                 return Err(format!("line {}: unknown property '{other}'", idx + 1));
             }

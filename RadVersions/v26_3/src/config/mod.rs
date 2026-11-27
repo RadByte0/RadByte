@@ -809,6 +809,9 @@ fn read_properties(raw: &str) -> Result<ServerConfigFile, String> {
         } else {
             key
         };
+        if key.starts_with("auto_update") || key.starts_with("auto-update") {
+            continue;
+        }
         let default = defaults
             .get(&key)
             .ok_or_else(|| format!("line {}: unknown property {key}", index + 1))?;

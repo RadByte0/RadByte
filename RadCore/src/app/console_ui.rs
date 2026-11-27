@@ -445,10 +445,10 @@ impl TuiState {
         let width = usize::from(cols);
         let height = usize::from(rows);
         // Layout:
-        // rows 1..=6: pixel-art header + divider
-        // rows 7..=(height - 4): internal scrollable log viewport
+        // rows 1..=9: 6-line ANSI Shadow logo + 2 status lines + divider
+        // rows 10..=(height - 4): internal scrollable log viewport
         // rows (height - 3)..=height: top divider, `> input`, bottom divider, hint/label
-        let header_rows = 6usize;
+        let header_rows = 9usize;
         let footer_rows = 4usize;
         let log_height = height.saturating_sub(header_rows + footer_rows).max(1);
 
@@ -591,11 +591,14 @@ fn wrap_ansi_or_plain(line: &str, max_cols: usize, out: &mut Vec<String>) {
     }
 }
 
-/// Appends the 3-line orange Antigravity-style `RADBYTE` pixel-art logo to `out`.
+/// Appends the 6-line orange Antigravity-style ANSI Shadow `RADBYTE` logo to `out`.
 pub fn append_radbyte_logo(out: &mut String) {
-    out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █   █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
-    out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▄▄▀  ▀▄▀    █   █▀▀ \x1b[0m\n");
-    out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀   █     █   █▄▄▄\x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;245;158;11m██████╗  █████╗ ██████╗ ██████╗ ██╗   ██╗████████╗███████╗\x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;240;142;12m██╔══██╗██╔══██╗██╔══██╗██╔══██╗╚██╗ ██╔╝╚══██╔══╝██╔════╝\x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;232;125;13m██████╔╝███████║██║  ██║██████╔╝ ╚████╔╝    ██║   █████╗  \x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;214;106;11m██╔══██╗██╔══██║██║  ██║██╔══██╗  ╚██╔╝     ██║   ██╔══╝  \x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;196;94;10m██║  ██║██║  ██║██████╔╝██████╔╝   ██║      ██║   ███████╗\x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;180;83;9m╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═════╝    ╚═╝      ╚═╝   ╚══════╝\x1b[0m\n");
 }
 
 fn append_pixel_header(
