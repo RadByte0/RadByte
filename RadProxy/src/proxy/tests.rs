@@ -1760,3 +1760,120 @@ async fn e2e_seamless_restart_freezes_player_and_reconnects() {
     );
     backend_task.await.unwrap();
 }
+
+#[tokio::test]
+async fn e2e_velocity_protocol_version_passthrough() {
+    const CLIENT_PROTO: i32 = 769;
+
+    // 1. Status ping without passthrough mirrors the client's protocol version.
+    let status_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let status_addr = status_listener.local_addr().unwrap();
+    let status_state = Arc::new(ProxyState::new(
+        test_config(None, ForwardingMode::None),
+        RadonManager::new(),
+        None,
+    ));
+    let server_state = Arc::clone(&status_state);
+    tokio::spawn(async move {
+        let (stream, peer) = status_listener.accept().await.unwrap();
+        handle_connection(stream, peer, server_state).await;
+    });
+
+    let mut client = TcpStream::connect(status_addr).await.unwrap();
+    let mut out = BytesMut::new();
+    encode_packet(
+        &Handshake {
+            protocol_version: VarInt(CLIENT_PROTO),
+            server_address: "localhost".into(),
+            server_port: status_addr.port(),
+            next_state: ConnectionState::Status,
+        },
+        &mut out,
+    )
+    .unwrap();
+    encode_packet(&StatusRequest, &mut out).unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let mut in_buf = BytesMut::new();
+    let status_frame = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap();
+    let status: StatusResponse = status_frame.decode_as().unwrap();
+    let payload = status.parse_payload().unwrap();
+    assert_eq!(payload.version.protocol, CLIENT_PROTO);
+
+    // 2. Login forwards the client's protocol_version unchanged to the backend.
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+    let backend_task = tokio::spawn(async move {
+        let (mut sock, _) = backend_listener.accept().await.unwrap();
+        let mut buf = BytesMut::new();
+        let hs: Handshake = read_next_frame(&mut sock, &mut buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        assert_eq!(hs.protocol_version, VarInt(CLIENT_PROTO));
+        let login: LoginStart = read_next_frame(&mut sock, &mut buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        let mut b_out = BytesMut::new();
+        encode_packet(
+            &LoginSuccess {
+                uuid: login.player_uuid,
+                username: login.username,
+                properties: Vec::new(),
+                session_id: Uuid::nil(),
+            },
+            &mut b_out,
+        )
+        .unwrap();
+        sock.write_all(&b_out).await.unwrap();
+    });
+
+    let cfg = test_config(Some(backend_addr), ForwardingMode::None);
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let login_state = Arc::new(ProxyState::new(cfg, RadonManager::new(), None));
+    tokio::spawn(async move {
+        let (stream, peer) = proxy_listener.accept().await.unwrap();
+        handle_connection(stream, peer, login_state).await;
+    });
+
+    let mut login_client = TcpStream::connect(proxy_addr).await.unwrap();
+    out.clear();
+    encode_packet(
+        &Handshake {
+            protocol_version: VarInt(CLIENT_PROTO),
+            server_address: "localhost".into(),
+            server_port: proxy_addr.port(),
+            next_state: ConnectionState::Login,
+        },
+        &mut out,
+    )
+    .unwrap();
+    encode_packet(
+        &LoginStart {
+            username: "ProtoTester".into(),
+            player_uuid: Uuid::nil(),
+        },
+        &mut out,
+    )
+    .unwrap();
+    login_client.write_all(&out).await.unwrap();
+
+    in_buf.clear();
+    let ls: LoginSuccess = read_next_frame(&mut login_client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap()
+        .decode_as()
+        .unwrap();
+    assert_eq!(ls.username, "ProtoTester");
+    backend_task.await.unwrap();
+}

@@ -66,10 +66,12 @@ use crate::radon::{RadonAction, RadonContext, RadonManager};
 
 struct CachedStatus {
     online_count: i32,
+    protocol_version: i32,
     encoded_frame: Bytes,
 }
 
 struct CachedPassthrough {
+    protocol_version: i32,
     fetched_at: Instant,
     payload: StatusPayload,
 }
@@ -414,7 +416,7 @@ impl ProxyState {
     }
 
     /// Returns a pre-encoded `StatusResponse` wire frame, rebuilding when needed.
-    async fn status_frame(&self, cfg: &ProxyConfig) -> Option<Bytes> {
+    async fn status_frame(&self, cfg: &ProxyConfig, client_protocol: i32) -> Option<Bytes> {
         let current_online = self.online_players.load(Ordering::Relaxed);
 
         if cfg.ping_passthrough == PingPassthroughMode::None
@@ -424,6 +426,7 @@ impl ProxyState {
             let guard = self.status_cache.load();
             if let Some(cached) = guard.as_ref()
                 && cached.online_count == current_online
+                && cached.protocol_version == client_protocol
             {
                 return Some(cached.encoded_frame.clone());
             }
@@ -431,7 +434,7 @@ impl ProxyState {
         }
 
         let passthrough = if cfg.ping_passthrough != PingPassthroughMode::None {
-            self.fetch_passthrough_status(cfg).await
+            self.fetch_passthrough_status(cfg, client_protocol).await
         } else {
             None
         };
@@ -445,7 +448,7 @@ impl ProxyState {
         let mut payload = StatusPayload {
             version: StatusVersion {
                 name: format!("RadByte {MINECRAFT_VERSION}"),
-                protocol: PROTOCOL_VERSION,
+                protocol: client_protocol,
             },
             players: Some(StatusPlayers {
                 max: cfg.max_players,
@@ -485,6 +488,7 @@ impl ProxyState {
         {
             self.status_cache.store(Some(Arc::new(CachedStatus {
                 online_count: current_online,
+                protocol_version: client_protocol,
                 encoded_frame: frozen.clone(),
             })));
         }
@@ -492,13 +496,18 @@ impl ProxyState {
         Some(frozen)
     }
 
-    async fn fetch_passthrough_status(&self, cfg: &ProxyConfig) -> Option<StatusPayload> {
+    async fn fetch_passthrough_status(
+        &self,
+        cfg: &ProxyConfig,
+        client_protocol: i32,
+    ) -> Option<StatusPayload> {
         {
             let guard = self
                 .passthrough_cache
                 .lock()
                 .expect("passthrough_cache poisoned");
             if let Some(cached) = guard.as_ref()
+                && cached.protocol_version == client_protocol
                 && cached.fetched_at.elapsed() < Duration::from_secs(3)
             {
                 return Some(cached.payload.clone());
@@ -518,7 +527,7 @@ impl ProxyState {
         let mut out = BytesMut::with_capacity(64);
         encode_packet(
             &Handshake {
-                protocol_version: VarInt(PROTOCOL_VERSION),
+                protocol_version: VarInt(client_protocol),
                 server_address: target.ip().to_string(),
                 server_port: target.port(),
                 next_state: ConnectionState::Status,
@@ -545,6 +554,7 @@ impl ProxyState {
             .lock()
             .expect("passthrough_cache poisoned");
         *guard = Some(CachedPassthrough {
+            protocol_version: client_protocol,
             fetched_at: Instant::now(),
             payload: parsed.clone(),
         });
@@ -664,6 +674,9 @@ pub async fn handle_connection(
         if radons.len() == 0 {
             match Handshake::peek_next_state(payload) {
                 Ok(ConnectionState::Status) => {
+                    let mut peek = payload;
+                    let client_protocol =
+                        VarInt::decode(&mut peek).map_or(PROTOCOL_VERSION, |v| v.0);
                     let _ = timeout(
                         cfg.handshake_timeout,
                         handle_status_stack(
@@ -672,6 +685,7 @@ pub async fn handle_connection(
                             &mut pos,
                             &mut filled,
                             peer_addr,
+                            client_protocol,
                             &state,
                             &cfg,
                         ),
@@ -773,7 +787,14 @@ pub async fn handle_connection(
         ConnectionState::Status => {
             let _ = timeout(
                 cfg.handshake_timeout,
-                handle_status(&mut client, &mut read_buf, peer_addr, &state, &cfg),
+                handle_status(
+                    &mut client,
+                    &mut read_buf,
+                    peer_addr,
+                    handshake.protocol_version.0,
+                    &state,
+                    &cfg,
+                ),
             )
             .await;
         }
@@ -800,6 +821,7 @@ async fn handle_status(
     client: &mut EncryptedStream,
     read_buf: &mut BytesMut,
     peer_addr: SocketAddr,
+    client_protocol: i32,
     state: &ProxyState,
     cfg: &ProxyConfig,
 ) {
@@ -811,7 +833,7 @@ async fn handle_status(
         match frame.id {
             StatusRequest::ID => {
                 state.metrics.record_status_ping();
-                let Some(encoded) = state.status_frame(cfg).await else {
+                let Some(encoded) = state.status_frame(cfg, client_protocol).await else {
                     return;
                 };
                 if client.write_all(&encoded).await.is_err() {
@@ -901,12 +923,14 @@ async fn read_stack_frame<S: AsyncRead + Unpin>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_status_stack(
     client: &mut EncryptedStream,
     buf: &mut [u8],
     pos: &mut usize,
     filled: &mut usize,
     peer_addr: SocketAddr,
+    client_protocol: i32,
     state: &ProxyState,
     cfg: &ProxyConfig,
 ) {
@@ -933,7 +957,7 @@ async fn handle_status_stack(
         match id {
             StatusRequest::ID => {
                 state.metrics.record_status_ping();
-                let Some(encoded) = state.status_frame(cfg).await else {
+                let Some(encoded) = state.status_frame(cfg, client_protocol).await else {
                     return;
                 };
                 if client.write_all(&encoded).await.is_err() {
