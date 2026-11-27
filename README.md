@@ -1,17 +1,16 @@
 # RadByte ⚡
 
 [![Latest Release](https://img.shields.io/github/v/release/RadByte0/RadByte?style=for-the-badge&color=E87D0D)](https://github.com/RadByte0/RadByte/releases/latest)
-[![Minecraft](https://img.shields.io/badge/Minecraft-26.3%20(777)-success?style=for-the-badge)](#components-)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=for-the-badge)](#quick-start-)
 [![Ko-Fi](https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/anarchbyte)
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/anarchbyte)
 
-**Modular Minecraft Java 26.3 (protocol 777) server, proxy, and limbo stack — written in Rust.**
+**Modular Minecraft Java server, L7 proxy, and limbo stack — written in Rust.**
 
-RadByte gives you a single-binary launcher experience for hosting a game server (**RadServer**), an L7 reverse proxy with WebAssembly plugins (**RadProxy**), and an ultra-lightweight waiting room (**RadLimbo**) — complete with an interactive terminal UI, live CPU/RAM metrics, automatic setup, and ready-to-import Pelican/Pterodactyl eggs.
+RadByte gives you a single-binary launcher experience for hosting a game server (**RadServer**), an L7 reverse proxy with WebAssembly plugins (**RadProxy**), and an ultra-lightweight waiting room (**RadLimbo**) — with version-agnostic host launchers, interactive terminal UI, live CPU/RAM metrics, automatic setup, and ready-to-import Pelican/Pterodactyl eggs.
 
 > [!NOTE]
-> **Project status:** RadByte targets Minecraft Java **26.3** (protocol **777**). Compatibility and gameplay mechanics are still in active development. Version data and some existing code have unresolved provenance — see the [provenance audit](docs/PROVENANCE_CLEAN_ROOM.md) before redistributing. RadByte is **not an official Minecraft product** and is not affiliated with Mojang or Microsoft.
+> **Project status:** Currently ships a native module for Minecraft Java **26.3** (with additional versions supported through loadable `rad-version` modules). Compatibility and gameplay mechanics are still in active development. Version data and some existing code have unresolved provenance — see the [provenance audit](docs/PROVENANCE_CLEAN_ROOM.md) before redistributing. RadByte is **not an official Minecraft product** and is not affiliated with Mojang or Microsoft.
 
 ---
 
@@ -19,7 +18,7 @@ RadByte gives you a single-binary launcher experience for hosting a game server 
 
 | Component | What it does | Needs Java / MC Data? |
 | :--- | :--- | :--- |
-| **RadServer** | Hosts the Minecraft 26.3 game world via a dynamically loaded native version module (`rad-version-26.3`) | Auto-downloads on first run |
+| **RadServer** | Hosts any supported Minecraft Java version via dynamically loaded `rad-version` native modules | Auto-downloads on first run |
 | **RadProxy** | High-performance L7 Minecraft proxy with hostname routing, forwarding (`modern` / `bungeeguard` / `legacy`), and WASM **Radons** | No |
 | **RadLimbo** | Ultra-lightweight fallback / waiting-room server | No |
 | **RadAPI** | Versioned plugin & WASM guest SDK (`apis/v1/`), auto-installed **only** when `radons/` has plugins | No |
@@ -86,7 +85,7 @@ cargo test --workspace --locked
 
 * **`RadCore/`** — Zero-copy Minecraft protocol codecs, packet definitions, CLI/TUI (`console_ui`, `setup_ui`), and auto-update primitives.
 * **`RadServer/`** — Host launcher, Mojang `--reports` data installer, portable JRE fetcher, and dynamic `rad-version` loader.
-* **`RadVersions/v26_3/`** — Minecraft 26.3 (protocol 777) world, entity, redstone, command, and networking implementation compiled as a native shared library.
+* **`RadVersions/`** — Per-version Minecraft world, entity, redstone, command, and networking implementations compiled as native shared libraries (e.g. `v26_3/`).
 * **`RadProxy/`** — High-performance L7 Minecraft proxy with HAProxy, velocity/legacy forwarding, and `wasmi` Radon sandbox.
 * **`RadLimbo/`** — Lightweight waiting-room server.
 * **`RadAPI/`** — Versioned plugin & WASM guest SDK (`rlib` + `cdylib`).
