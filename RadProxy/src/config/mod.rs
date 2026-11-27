@@ -376,8 +376,17 @@ impl ProxyConfig {
                 toml::from_str::<ProxyConfigFile>(&content)
                     .map_err(|e| Error::InvalidString(format!("invalid {}: {e}", path.display())))?
             } else {
-                read_proxy_properties(&content)
-                    .map_err(|e| Error::InvalidString(format!("invalid {}: {e}", path.display())))?
+                let parsed = read_proxy_properties(&content).map_err(|e| {
+                    Error::InvalidString(format!("invalid {}: {e}", path.display()))
+                })?;
+                if !content.contains("# Network and status") {
+                    let expanded = write_proxy_properties(&parsed).map_err(|e| {
+                        Error::InvalidString(format!("invalid proxy defaults: {e}"))
+                    })?;
+                    fs::write(path, expanded)?;
+                    info!(path = %path.display(), "expanded minimal proxy.properties with full settings");
+                }
+                parsed
             }
         } else if is_toml {
             let default_cfg = ProxyConfigFile::default();
@@ -677,15 +686,31 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
     };
 
     let mut out = String::new();
-    out.push_str("# RadProxy Configuration (Minecraft 26.3 / protocol 777)\n");
+    out.push_str("# RadProxy Configuration (Velocity-style version passthrough)\n");
     out.push_str(&format!("config-version={}\n\n", file.config_version));
     out.push_str("# Network and status\n");
     out.push_str(&format!("server-ip={}\n", addr.ip()));
     out.push_str(&format!("server-port={}\n", addr.port()));
     out.push_str(&format!("online-mode={}\n", file.online_mode));
     out.push_str(&format!("haproxy-protocol={}\n", file.haproxy_protocol));
+    out.push_str(&format!(
+        "haproxy-allow-untrusted={}\n",
+        file.haproxy_allow_untrusted
+    ));
+    if file.haproxy_trusted_proxies.is_empty() {
+        out.push_str("# haproxy-trusted-proxies=127.0.0.1,10.0.0.1\n");
+    } else {
+        let ips: Vec<String> = file
+            .haproxy_trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        out.push_str(&format!("haproxy-trusted-proxies={}\n", ips.join(",")));
+    }
     out.push_str(&format!("motd={}\n", file.motd));
-    if !file.motds.is_empty() {
+    if file.motds.is_empty() {
+        out.push_str("# motds=Line 1|Line 2\n");
+    } else {
         out.push_str(&format!("motds={}\n", file.motds.join("|")));
     }
     out.push_str(&format!("max-players={}\n", file.max_players));
@@ -705,6 +730,8 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
     out.push_str(&format!("forwarding-secret={}\n", file.forwarding_secret));
     if let Some(ref brand) = file.proxy_brand {
         out.push_str(&format!("proxy-brand={brand}\n"));
+    } else {
+        out.push_str("# proxy-brand=RadProxy\n");
     }
     out.push_str(&format!(
         "bungeecord-messaging={}\n\n",
@@ -728,19 +755,27 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
         file.kick_existing_players
     ));
     out.push_str(&format!("white-list={}\n", file.whitelist_enabled));
-    if !file.whitelist.is_empty() {
+    if file.whitelist.is_empty() {
+        out.push_str("# whitelist=PlayerOne,PlayerTwo\n");
+    } else {
         out.push_str(&format!("whitelist={}\n", file.whitelist.join(",")));
     }
-    if !file.banned_players.is_empty() {
+    if file.banned_players.is_empty() {
+        out.push_str("# banned-players=Griefer\n");
+    } else {
         out.push_str(&format!(
             "banned-players={}\n",
             file.banned_players.join(",")
         ));
     }
-    if !file.banned_ips.is_empty() {
+    if file.banned_ips.is_empty() {
+        out.push_str("# banned-ips=1.2.3.4\n");
+    } else {
         out.push_str(&format!("banned-ips={}\n", file.banned_ips.join(",")));
     }
-    if !file.admins.is_empty() {
+    if file.admins.is_empty() {
+        out.push_str("# admins=OwnerName\n");
+    } else {
         out.push_str(&format!("admins={}\n", file.admins.join(",")));
     }
     out.push('\n');
@@ -763,11 +798,46 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
             out.push_str(&format!("server.{k}={v}\n"));
         }
     }
+    if file.forced_hosts.is_empty() {
+        out.push_str("# forced-host.play.example.com=lobby\n");
+    } else {
+        let mut fh_keys: Vec<_> = file.forced_hosts.keys().collect();
+        fh_keys.sort();
+        for k in fh_keys {
+            if let Some(v) = file.forced_hosts.get(k) {
+                out.push_str(&format!("forced-host.{k}={v}\n"));
+            }
+        }
+    }
+    if file.server_groups.is_empty() {
+        out.push_str("# server-group.hub=lobby,survival\n");
+    } else {
+        let mut sg_keys: Vec<_> = file.server_groups.keys().collect();
+        sg_keys.sort();
+        for k in sg_keys {
+            if let Some(v) = file.server_groups.get(k) {
+                out.push_str(&format!("server-group.{k}={}\n", v.join(",")));
+            }
+        }
+    }
+    if file.restricted_servers.is_empty() {
+        out.push_str("# restricted-server.staff=AdminOne,AdminTwo\n");
+    } else {
+        let mut rs_keys: Vec<_> = file.restricted_servers.keys().collect();
+        rs_keys.sort();
+        for k in rs_keys {
+            if let Some(v) = file.restricted_servers.get(k) {
+                out.push_str(&format!("restricted-server.{k}={}\n", v.join(",")));
+            }
+        }
+    }
     out.push('\n');
 
     out.push_str("# Observability and Plugins (Radons)\n");
     if let Some(ref metrics) = file.metrics_bind_addr {
         out.push_str(&format!("metrics-bind-addr={metrics}\n"));
+    } else {
+        out.push_str("# metrics-bind-addr=127.0.0.1:9100\n");
     }
     out.push_str(&format!(
         "log-player-connections={}\n",
@@ -1104,4 +1174,46 @@ fn read_proxy_properties(raw: &str) -> std::result::Result<ProxyConfigFile, Stri
     }
 
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimal_proxy_properties_expands_to_full_velocity_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "radproxy_expand_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proxy.properties");
+        fs::write(
+            &path,
+            "# RadByte configuration\nserver-ip=0.0.0.0\nserver-port=30000\nforwarding-mode=none\nbackend-addr=127.0.0.1:25567\n",
+        )
+        .unwrap();
+
+        let cfg = ProxyConfig::load_or_create(&path).unwrap();
+        assert_eq!(
+            cfg.bind_addr,
+            "0.0.0.0:30000".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(cfg.forwarding_mode, ForwardingMode::None);
+        assert_eq!(
+            cfg.backend_addr,
+            Some("127.0.0.1:25567".parse::<SocketAddr>().unwrap())
+        );
+
+        let expanded = fs::read_to_string(&path).unwrap();
+        assert!(expanded.contains("# Network and status"));
+        assert!(expanded.contains("ping-passthrough="));
+        assert!(expanded.contains("seamless-restart="));
+        assert!(expanded.contains("# forced-host.play.example.com=lobby"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
