@@ -486,11 +486,13 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
 
         let mut out = String::with_capacity(2048);
         out.push_str("\x1b[H");
-        out.push_str("\x1b[2K  \x1b[38;2;245;158;11m██████╗ \x1b[0m  \x1b[1;37mRadServer Setup\x1b[0m \x1b[38;2;232;125;13mv");
+        out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █  █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
+        out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▀▀▄ █▄▄█   █   █▀▀ \x1b[0m\n");
+        out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀ ▄▄▄█   █   █▄▄▄\x1b[0m\n");
+        out.push_str("\x1b[2K  \x1b[1;37mRadServer Setup\x1b[0m \x1b[38;2;232;125;13mv");
         out.push_str(env!("CARGO_PKG_VERSION"));
-        out.push_str("\x1b[0m\n");
-        out.push_str("\x1b[2K  \x1b[38;2;232;125;13m██╔══██╗\x1b[0m  \x1b[90mFirst-Run Configuration\x1b[0m\n");
-        out.push_str("\x1b[2K  \x1b[38;2;232;125;13m██████╔╝\x1b[0m  \x1b[90m↑/↓ Navigate  •  Space/Enter Toggle  •  / Search  •  Esc Quit\x1b[0m\n");
+        out.push_str("\x1b[0m  \x1b[90m•  First-Run Configuration\x1b[0m\n");
+        out.push_str("\x1b[2K  \x1b[90m↑/↓ Navigate  •  Space/Enter Toggle  •  / Search  •  Esc Quit\x1b[0m\n");
         out.push_str(&format!("\x1b[2K\x1b[38;2;56;56;56m{divider}\x1b[0m\n"));
 
         let row_marker = |idx: usize| {

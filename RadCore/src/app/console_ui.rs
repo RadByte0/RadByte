@@ -574,38 +574,17 @@ fn append_pixel_header(
     ram_mbit: f64,
     _width: usize,
 ) {
-    let rows = [
-        (
-            "\x1b[38;2;245;158;11m██████╗ \x1b[0m",
-            format!("\x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m"),
-        ),
-        (
-            "\x1b[38;2;232;125;13m██╔══██╗\x1b[0m",
-            format!(
-                "\x1b[90mMinecraft {} (protocol {})\x1b[0m",
-                crate::MINECRAFT_VERSION,
-                crate::PROTOCOL_VERSION
-            ),
-        ),
-        (
-            "\x1b[38;2;232;125;13m██████╔╝\x1b[0m",
-            format!(
-                "\x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;232;125;13mCPU {cpu_pct:.1}%\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;245;158;11mRAM {ram_mbit:.1} Mbit\x1b[0m"
-            ),
-        ),
-        (
-            "\x1b[38;2;217;119;6m██╔══██╗\x1b[0m",
-            format!("\x1b[90m{hint}  •  Scroll: Mouse / PgUp / PgDn\x1b[0m"),
-        ),
-        ("\x1b[38;2;180;83;9m██║  ██║\x1b[0m", String::new()),
-    ];
-    for (art, info) in rows {
-        if info.is_empty() {
-            out.push_str(&format!("\x1b[2K  {art}\n"));
-        } else {
-            out.push_str(&format!("\x1b[2K  {art}   {info}\n"));
-        }
-    }
+    out.push_str("\x1b[2K  \x1b[38;2;245;158;11m█▀▀█ ▄▀▀▄ █▀▀▄ █▀▀▄ █  █ ▀▀█▀▀ █▀▀▀\x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;232;125;13m█▄▄▀ █▄▄█ █  █ █▀▀▄ █▄▄█   █   █▀▀ \x1b[0m\n");
+    out.push_str("\x1b[2K  \x1b[38;2;180;83;9m█  █ █  █ █▄▄▀ █▄▄▀ ▄▄▄█   █   █▄▄▄\x1b[0m\n");
+    out.push_str(&format!(
+        "\x1b[2K  \x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m  \x1b[90m•  Minecraft {} (protocol {})\x1b[0m\n",
+        crate::MINECRAFT_VERSION,
+        crate::PROTOCOL_VERSION
+    ));
+    out.push_str(&format!(
+        "\x1b[2K  \x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;232;125;13mCPU {cpu_pct:.1}%\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;245;158;11mRAM {ram_mbit:.1} Mbit\x1b[0m  \x1b[90m•  {hint}  •  Scroll: Mouse/PgUp/PgDn\x1b[0m\n"
+    ));
 }
 
 /// Active Antigravity-style alternate-screen console session.
