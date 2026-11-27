@@ -44,7 +44,10 @@ fn is_container_or_panel() -> bool {
     if std::path::Path::new("/.dockerenv").exists() {
         return true;
     }
-    false
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// Returns `true` when both stdin and stdout are interactive terminals and not inside a panel/container.
@@ -138,9 +141,7 @@ pub struct RawTerminalGuard {
     #[cfg(windows)]
     orig_mode: u32,
     #[cfg(unix)]
-    orig_termios: [u8; 64],
-    #[cfg(unix)]
-    termios_saved: bool,
+    saved_stty: Option<String>,
 }
 
 impl RawTerminalGuard {
@@ -178,23 +179,17 @@ impl RawTerminalGuard {
         }
         #[cfg(unix)]
         {
-            unsafe extern "C" {
-                fn tcgetattr(fd: i32, termios: *mut u8) -> i32;
-                fn tcsetattr(fd: i32, optional_actions: i32, termios: *const u8) -> i32;
-            }
-            let mut orig = [0u8; 64];
-            let ok = unsafe { tcgetattr(0, orig.as_mut_ptr()) } == 0;
-            if ok {
-                // Disable ICANON and ECHO cleanly via stty-compatible raw flags or c_lflag offset is platform-specific;
-                // use `stty -icanon -echo` fallback for portability across Linux/macOS/ARM64.
-                let _ = std::process::Command::new("stty")
-                    .args(["-icanon", "-echo", "min", "1", "time", "0"])
-                    .status();
-            }
-            Self {
-                orig_termios: orig,
-                termios_saved: ok,
-            }
+            let saved_stty = std::process::Command::new("stty")
+                .arg("-g")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .filter(|s| !s.is_empty());
+            let _ = std::process::Command::new("stty")
+                .args(["-icanon", "-echo", "min", "1", "time", "0"])
+                .status();
+            Self { saved_stty }
         }
     }
 }
@@ -212,13 +207,12 @@ impl Drop for RawTerminalGuard {
             }
         }
         #[cfg(unix)]
-        if self.termios_saved {
-            unsafe extern "C" {
-                fn tcsetattr(fd: i32, optional_actions: i32, termios: *const u8) -> i32;
-            }
-            unsafe {
-                let _ = tcsetattr(0, 0, self.orig_termios.as_ptr());
-            }
+        if let Some(ref mode) = self.saved_stty {
+            let _ = std::process::Command::new("stty").arg(mode).status();
+        } else {
+            let _ = std::process::Command::new("stty")
+                .args(["icanon", "echo"])
+                .status();
         }
     }
 }
