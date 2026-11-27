@@ -52,20 +52,38 @@ fn main() {
 
     print_startup_banner("RadServer", env!("CARGO_PKG_VERSION"), SERVER_BANNER);
 
-    let cfg_path = resolve_config_path("rad.properties");
-    let work_dir = cfg_path
+    let server_cfg_path = resolve_config_path("server.properties");
+    let work_dir = server_cfg_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let versions_dir = resolve_versions_dir(&cfg_path);
+    let rad_cfg_path =
+        if server_cfg_path.file_name().and_then(|n| n.to_str()) == Some("rad.properties") {
+            server_cfg_path.clone()
+        } else {
+            work_dir.join("rad.properties")
+        };
+    if !rad_cfg_path.exists() {
+        let _ = rad_core::auto_update::save_auto_update_settings(
+            &rad_cfg_path,
+            &rad_core::auto_update::AutoUpdateSettings::default(),
+        );
+    } else if !server_cfg_path.exists()
+        && server_cfg_path.file_name().and_then(|n| n.to_str()) == Some("server.properties")
+        && let Ok(legacy) = std::fs::read_to_string(&rad_cfg_path)
+        && (legacy.contains("server-port=") || legacy.contains("motd="))
+    {
+        let _ = std::fs::write(&server_cfg_path, legacy);
+    }
+    let versions_dir = resolve_versions_dir(&server_cfg_path);
 
     if let Err(e) = version_install::ensure_installed_headless(work_dir, &versions_dir) {
         error!(error = %e, "version setup required before starting RadServer");
         exit_with_pause(1);
     }
 
-    auto_update::run_startup_auto_update(&cfg_path, work_dir, &versions_dir);
-    auto_update::spawn_background_watcher(cfg_path.clone());
+    auto_update::run_startup_auto_update(&rad_cfg_path, work_dir, &versions_dir);
+    auto_update::spawn_background_watcher(rad_cfg_path.clone());
 
     let _console_ui = ConsoleUi::start("RadServer", env!("CARGO_PKG_VERSION"), "help, op, stop");
 
@@ -133,7 +151,7 @@ fn main() {
     let exit_code = match launch_version_library(
         &library,
         &lib_path,
-        &cfg_path,
+        &server_cfg_path,
         &versions_dir,
         version_package.manifest(),
     ) {
