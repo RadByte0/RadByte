@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use rad_core::api_runtime::{api_library_filename, api_release_asset_name, api_target_info};
 use rad_core::auto_update::{
-    cleanup_old_binary, has_staged_binary_update, is_auto_update_enabled, is_newer_version,
-    replace_current_binary_and_restart, stage_binary_update,
+    cleanup_old_binary, get_auto_update_interval_minutes, has_staged_binary_update,
+    is_auto_update_enabled, is_auto_update_launcher_enabled, is_auto_update_radapi_enabled,
+    is_auto_update_radons_enabled, is_newer_version, replace_current_binary_and_restart,
+    scan_radon_github_targets, stage_binary_update,
 };
 
 fn release_repo() -> &'static str {
@@ -46,7 +48,9 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path) {
         return;
     };
 
-    if is_newer_version(latest_tag, env!("CARGO_PKG_VERSION")) {
+    if is_auto_update_launcher_enabled(cfg_path)
+        && is_newer_version(latest_tag, env!("CARGO_PKG_VERSION"))
+    {
         let asset = format!("rad-proxy-{target}{exe_ext}");
         let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
         if let Ok(resp) = client.get(&url).send().and_then(|r| r.error_for_status()) {
@@ -69,7 +73,8 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path) {
     let api_dir = work_dir.join("apis").join("v1");
     let api_tag_marker = api_dir.join(".release_tag");
     let current_api_tag = std::fs::read_to_string(&api_tag_marker).unwrap_or_default();
-    if api_dir.is_dir()
+    if is_auto_update_radapi_enabled(cfg_path)
+        && api_dir.is_dir()
         && current_api_tag.trim() != latest_tag
         && let (Ok(asset), Ok(local_name)) = (api_release_asset_name(1), api_library_filename(1))
     {
@@ -92,6 +97,37 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path) {
                     let _ = std::fs::remove_file(&tmp);
                 }
             }
+        }
+    }
+
+    if is_auto_update_radons_enabled(cfg_path) {
+        check_radon_updates(&client, &work_dir.join("radons"));
+    }
+}
+
+fn check_radon_updates(client: &reqwest::blocking::Client, radons_dir: &Path) {
+    for target in scan_radon_github_targets(radons_dir) {
+        let Ok(rel) = client
+            .get(format!(
+                "https://api.github.com/repos/{}/releases/latest",
+                target.repo
+            ))
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json::<serde_json::Value>())
+        else {
+            continue;
+        };
+        if let Some(latest_tag) = rel["tag_name"].as_str()
+            && is_newer_version(latest_tag, &target.version)
+        {
+            tracing::info!(
+                radon = %target.id,
+                current = %target.version,
+                latest = %latest_tag,
+                repo = %target.repo,
+                "newer Radon release available on GitHub"
+            );
         }
     }
 }
@@ -139,7 +175,7 @@ pub fn check_and_stage_in_background() -> Option<String> {
     Some(latest_tag)
 }
 
-/// Spawns a background watcher that checks for updates every 30 minutes while running.
+/// Spawns a background watcher that checks for updates at the configured interval while running.
 pub fn spawn_background_watcher(cfg_path: std::path::PathBuf) {
     if !is_auto_update_enabled(&cfg_path) {
         return;
@@ -150,14 +186,30 @@ pub fn spawn_background_watcher(cfg_path: std::path::PathBuf) {
             if !is_auto_update_enabled(&cfg_path) {
                 return;
             }
-            if let Some(tag) = check_and_stage_in_background() {
+            if is_auto_update_radons_enabled(&cfg_path)
+                && let Ok(client) = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(10))
+                    .user_agent(concat!("RadProxy/", env!("CARGO_PKG_VERSION")))
+                    .build()
+            {
+                let radons_dir = cfg_path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("radons");
+                check_radon_updates(&client, &radons_dir);
+            }
+            if is_auto_update_launcher_enabled(&cfg_path)
+                && let Some(tag) = check_and_stage_in_background()
+            {
                 tracing::info!(
                     tag = %tag,
                     "update downloaded in background; type 'update' to restart and apply"
                 );
                 return;
             }
-            std::thread::sleep(Duration::from_secs(30 * 60));
+            let mins = get_auto_update_interval_minutes(&cfg_path);
+            std::thread::sleep(Duration::from_secs(mins.saturating_mul(60)));
         }
     });
 }

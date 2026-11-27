@@ -438,7 +438,7 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
     };
     let cfg_path = work_dir.join("rad.properties");
     let eula_path = work_dir.join("eula.txt");
-    let mut auto_update = rad_core::auto_update::is_auto_update_enabled(&cfg_path);
+    let mut auto_menu = rad_core::setup_ui::AutoUpdateMenu::load(&cfg_path, true, true);
     let mut eula_ok =
         is_eula_file_accepted(&eula_path) || std::env::args().skip(1).any(|a| a == "--accept-eula");
     let mut show_older = false;
@@ -572,11 +572,6 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
         } else {
             "\x1b[90m[ ]\x1b[0m"
         };
-        let auto_box = if auto_update {
-            "\x1b[38;2;232;125;13m[x]\x1b[0m"
-        } else {
-            "\x1b[90m[ ]\x1b[0m"
-        };
         let eula_box = if eula_ok {
             "\x1b[32m[x]\x1b[0m"
         } else {
@@ -594,10 +589,8 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
             "{} \x1b[1;37mShow older releases:\x1b[0m   {older_box}",
             row_marker(1)
         )));
-        out.push_str(&box_line(&format!(
-            "{} \x1b[1;37mAuto-update all:\x1b[0m       {auto_box} \x1b[90m(launcher, versions, API)\x1b[0m",
-            row_marker(2)
-        )));
+        out.push_str(&box_line(&auto_menu.main_row(focused_row == 2)));
+        auto_menu.append_sub_rows(&mut out, focused_row == 2, box_line);
         out.push_str(&box_line(&format!(
             "{} \x1b[1;37mMinecraft EULA:\x1b[0m        {eula_box} \x1b[90m(aka.ms/MinecraftEULA)\x1b[0m",
             row_marker(3)
@@ -638,34 +631,50 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
             let done = matches!(b, b'~' | b'A'..=b'Z' | b'a'..=b'z') || esc_seq.len() >= 12;
             if done {
                 in_esc = false;
-                match esc_seq.as_slice() {
-                    b"[A" => {
-                        editing_search = false;
-                        editing_local = false;
-                        if dropdown_open && focused_row == 0 {
-                            selected_rel_idx = selected_rel_idx.saturating_sub(1);
-                        } else {
-                            focused_row = focused_row.saturating_sub(1);
-                        }
+                if focused_row == 2 {
+                    if let Some(delta) = auto_menu.handle_esc(esc_seq.as_slice()) {
+                        focused_row = if delta < 0 { 1 } else { 3 };
+                    } else {
+                        let _ = rad_core::auto_update::save_auto_update_settings(
+                            &cfg_path,
+                            &auto_menu.settings,
+                        );
                     }
-                    b"[B" => {
-                        editing_search = false;
-                        editing_local = false;
-                        if dropdown_open
-                            && focused_row == 0
-                            && selected_rel_idx + 1 < filtered.len()
-                        {
-                            selected_rel_idx += 1;
-                        } else if focused_row < 5 {
-                            focused_row += 1;
+                } else {
+                    match esc_seq.as_slice() {
+                        b"[A" => {
+                            editing_search = false;
+                            editing_local = false;
+                            if dropdown_open && focused_row == 0 {
+                                selected_rel_idx = selected_rel_idx.saturating_sub(1);
+                            } else {
+                                focused_row = focused_row.saturating_sub(1);
+                            }
                         }
+                        b"[B" => {
+                            editing_search = false;
+                            editing_local = false;
+                            if dropdown_open
+                                && focused_row == 0
+                                && selected_rel_idx + 1 < filtered.len()
+                            {
+                                selected_rel_idx += 1;
+                            } else if focused_row < 5 {
+                                focused_row += 1;
+                            }
+                        }
+                        b"[C" if focused_row == 0 => dropdown_open = true,
+                        b"[D" if focused_row == 0 => dropdown_open = false,
+                        _ => {}
                     }
-                    b"[C" if focused_row == 0 => dropdown_open = true,
-                    b"[D" if focused_row == 0 => dropdown_open = false,
-                    _ => {}
                 }
                 esc_seq.clear();
             }
+            continue;
+        }
+        if auto_menu.handle_interval_key(b) {
+            let _ =
+                rad_core::auto_update::save_auto_update_settings(&cfg_path, &auto_menu.settings);
             continue;
         }
 
@@ -710,22 +719,29 @@ fn prompt_interactive_tui_setup(work_dir: &Path) -> Result<ConsoleSetupChoice, S
                 dropdown_open = true;
                 editing_search = true;
             }
-            b'\t' => focused_row = (focused_row + 1) % 6,
+            b'\t' => {
+                auto_menu.in_sub = false;
+                focused_row = (focused_row + 1) % 6;
+            }
             b' ' | b'\r' | b'\n' => {
                 notice.clear();
                 match focused_row {
                     0 => dropdown_open = !dropdown_open,
                     1 => show_older = !show_older,
                     2 => {
-                        auto_update = !auto_update;
-                        let _ =
-                            rad_core::auto_update::set_auto_update_setting(&cfg_path, auto_update);
+                        auto_menu.handle_activate();
+                        let _ = rad_core::auto_update::save_auto_update_settings(
+                            &cfg_path,
+                            &auto_menu.settings,
+                        );
                     }
                     3 => eula_ok = !eula_ok,
                     4 => editing_local = true,
                     5 => {
-                        let _ =
-                            rad_core::auto_update::set_auto_update_setting(&cfg_path, auto_update);
+                        let _ = rad_core::auto_update::save_auto_update_settings(
+                            &cfg_path,
+                            &auto_menu.settings,
+                        );
                         let tag = filtered
                             .get(selected_rel_idx)
                             .map(|r| r.tag.clone())

@@ -41,6 +41,12 @@ pub struct RadonManifest {
     /// Target backend socket address when `route_host` matches.
     #[serde(default)]
     pub route_to: Option<String>,
+    /// Optional GitHub repository (`"owner/repo"` or URL) for Radon update checks.
+    #[serde(default)]
+    pub github: Option<String>,
+    /// Optional source repository URL (used for update checks when pointing to GitHub).
+    #[serde(default)]
+    pub repository: Option<String>,
 }
 
 impl RadonManifest {
@@ -50,6 +56,15 @@ impl RadonManifest {
         self.target
             .iter()
             .any(|&t| t == target || t == RadonTarget::All)
+    }
+
+    /// Returns normalized `"owner/repo"` if `github` or `repository` points to a GitHub repo.
+    #[must_use]
+    pub fn github_repo(&self) -> Option<String> {
+        self.github
+            .as_deref()
+            .or(self.repository.as_deref())
+            .and_then(crate::auto_update::parse_github_repo)
     }
 }
 
