@@ -218,7 +218,7 @@ impl Default for ServerConfigFile {
             bind_addr: "127.0.0.1:25567".into(),
             forwarding_mode: ServerForwardingMode::None,
             forwarding_secret: "change-me-radbyte-secret".into(),
-            motd: "RadServer 26.3 - Hub".into(),
+            motd: "RadServer".into(),
             max_players: 200,
             view_distance: 12,
             simulation_distance: Some(8),
@@ -570,49 +570,112 @@ fn write_server_toml(file: &ServerConfigFile) -> String {
 # server.toml — RadServer Configuration
 # ==============================================================================
 
+# Internal config schema version (do not edit manually).
 config_version = {config_version}
 
-# === Network & Proxy Forwarding ===============================================
-bind_addr = {bind_addr:?}
-# Proxy forwarding: "none" | "legacy" (BungeeCord) | "bungeeguard" | "modern" (Velocity)
-forwarding_mode = {forwarding:?}
-forwarding_secret = {forwarding_secret:?}
 
-# === Server List & Status =====================================================
+# === Server & Network =========================================================
+
+# IP address and port the server listens on.
+bind_addr = {bind_addr:?}
+
+# Message of the Day shown in the Minecraft server list.
 motd = {motd:?}
+
+# Maximum number of players allowed online at once.
 max_players = {max_players}
+
+# Respond to server list ping requests (false hides server status).
 enable_status = {enable_status}
+
+# Hide online player count and player list sample in server list pings.
 hide_online_players = {hide_online_players}
 
+
 # === World & Gameplay =========================================================
+
+# World folder name (vanilla: level-name).
 level_name = {level_name:?}
-world_type = {world_type:?}                  # "flat" | "seeded"
+
+# World generator: "flat" or "seeded".
+world_type = {world_type:?}
+
+# Seed used when world_type = "seeded" (0 = random/default).
 world_seed = {world_seed}
+
+# Maximum world border radius in blocks (1..=29999984).
 max_world_size = {max_world_size}
+
+# Render distance sent to clients in chunks (2..=16).
 view_distance = {view_distance}
-tps = {tps}
-# 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator
+
+# Default game mode: 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator.
 game_mode = {game_mode}
+
+# Force players back into the default game_mode on every join.
 force_gamemode = {force_gamemode}
-# 0 = Peaceful, 1 = Easy, 2 = Normal, 3 = Hard
+
+# Game difficulty: 0 = Peaceful, 1 = Easy, 2 = Normal, 3 = Hard.
 difficulty = {difficulty}
+
+# Hardcore mode (forces Hard difficulty and switches dead players to Spectator).
 hardcore = {hardcore}
+
+# Allow player-versus-player combat.
 pvp = {pvp}
+
+# Protected radius around spawn for non-operators in blocks (0 = disabled).
+spawn_protection = {spawn_protection}
+
+
+# === Spawn & Simulation =======================================================
+
+# Default world spawn coordinates.
 spawn_x = {spawn_x}
 spawn_y = {spawn_y}
 spawn_z = {spawn_z}
-spawn_protection = {spawn_protection}
+
+# Target server tick rate (vanilla default = 20).
+tps = {tps}
+
+# Maximum number of active mobs in the world.
 max_mobs = {max_mobs}
+
+# Periodic world autosave interval in seconds (0 = disabled).
 autosave_interval_secs = {autosave}
 
-# === Access Control & Branding ================================================
-# Note: Use `/op <player>` in the server console to manage operators (ops.json).
+
+# === Players, Permissions & Branding ==========================================
+# Note: Manage operators in-game or via console with `/op <player>` (ops.json).
+
+# Kick online non-whitelisted players when the whitelist is enabled or reloaded.
 enforce_whitelist = {enforce_whitelist}
+
+# Default operator permission level (1..=4).
 op_permission_level = {op_level}
-player_idle_timeout = {idle_timeout}          # Minutes before idle kick (0 = disabled)
+
+# Minutes before an idle player is kicked (0 = disabled).
+player_idle_timeout = {idle_timeout}
+
+# Server brand shown on the client F3 debug screen.
 brand = {brand:?}
 
+
+# === Proxy Forwarding =========================================================
+
+# Forwarding expected from RadProxy / Velocity:
+#   "none"        - Direct connections (no proxy forwarding)
+#   "legacy"      - BungeeCord IP/UUID forwarding
+#   "bungeeguard" - BungeeGuard token forwarding
+#   "modern"      - Velocity Modern Forwarding (HMAC-SHA256)
+forwarding_mode = {forwarding:?}
+
+# Shared secret for "modern" or "bungeeguard" forwarding (must match proxy.toml).
+forwarding_secret = {forwarding_secret:?}
+
+
 # === Advanced & Timeouts ======================================================
+
 max_packet_size = {max_packet_size}
 login_timeout_secs = {login_timeout}
 forwarding_timeout_secs = {forwarding_timeout}

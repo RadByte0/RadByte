@@ -74,7 +74,7 @@ impl Default for LimboConfigFile {
             bind_addr: "127.0.0.1:25566".into(),
             forwarding_mode: LimboForwardingMode::None,
             forwarding_secret: "change-me-radbyte-secret".into(),
-            motd: "RadLimbo 26.3 - Waiting Room".into(),
+            motd: "RadLimbo".into(),
             max_players: 1000,
             view_distance: 2,
             game_mode: 3,
@@ -223,28 +223,48 @@ fn write_limbo_toml(file: &LimboConfigFile) -> String {
 # limbo.toml — RadLimbo Configuration
 # ==============================================================================
 
+# Internal config schema version (do not edit manually).
 config_version = {config_version}
 
-# === Network & Proxy Forwarding ===============================================
-bind_addr = {bind_addr:?}
-# Proxy forwarding: "none" | "legacy" (BungeeCord) | "bungeeguard" | "modern" (Velocity)
-forwarding_mode = {forwarding:?}
-forwarding_secret = {forwarding_secret:?}
 
-# === Waiting Room & Gameplay ==================================================
+# === Server & Network =========================================================
+
+# IP address and port the limbo server listens on.
+bind_addr = {bind_addr:?}
+
+# Message of the Day shown if pinged directly.
 motd = {motd:?}
+
+# Maximum players reported in Status / PlayLogin.
 max_players = {max_players}
-view_distance = {view_distance}
-# 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator
+
+
+# === Waiting Room & Spawn =====================================================
+
+# Game mode: 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator.
 game_mode = {game_mode}
 
-# === Spawn Coordinates ========================================================
+# Client view distance in chunks.
+view_distance = {view_distance}
+
+# Waiting room spawn coordinates.
 spawn_x = {spawn_x}
 spawn_y = {spawn_y}
 spawn_z = {spawn_z}
 
-# === Branding, Reconnect & Advanced ===========================================
+# Server brand shown on the client F3 debug screen.
 brand = {brand:?}
+
+
+# === Proxy Forwarding & Limits ================================================
+
+# Forwarding expected from RadProxy / Velocity:
+#   "none" | "legacy" (BungeeCord) | "bungeeguard" | "modern" (Velocity)
+forwarding_mode = {forwarding:?}
+
+# Shared secret for "modern" or "bungeeguard" forwarding (must match proxy.toml).
+forwarding_secret = {forwarding_secret:?}
+
 keep_alive_interval_secs = {keep_alive}
 max_packet_size = {max_packet_size}
 "#,
