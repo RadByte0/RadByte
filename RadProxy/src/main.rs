@@ -47,14 +47,17 @@ fn main() {
         }
     }
 
-    let cfg_path = resolve_config_path("proxy.properties");
+    let cfg_path = resolve_config_path("proxy.toml");
     let rad_cfg_path = rad_core::auto_update::rad_properties_path_for(&cfg_path);
     rad_core::auto_update::ensure_rad_and_migrate_legacy(
         &cfg_path,
         &rad_cfg_path,
         &["server-port=", "backend-addr="],
     );
-    if let Err(err) = rad_core::setup_ui::ensure_proxy_setup(&cfg_path) {
+    let legacy_props = cfg_path.with_file_name("proxy.properties");
+    if (cfg_path.exists() || !legacy_props.exists())
+        && let Err(err) = rad_core::setup_ui::ensure_proxy_setup(&cfg_path)
+    {
         error!(%err, "proxy setup cancelled");
         exit_with_pause(1);
     }

@@ -457,8 +457,21 @@ impl ProxyConfig {
         let raw = if path.exists() {
             let content = fs::read_to_string(path)?;
             if is_toml {
-                toml::from_str::<ProxyConfigFile>(&content)
-                    .map_err(|e| Error::InvalidString(format!("invalid {}: {e}", path.display())))?
+                if content
+                    .trim_start_matches('\u{feff}')
+                    .starts_with("# RadByte configuration")
+                {
+                    let parsed = read_proxy_properties(&content).map_err(|e| {
+                        Error::InvalidString(format!("invalid {}: {e}", path.display()))
+                    })?;
+                    fs::write(path, write_proxy_toml(&parsed))?;
+                    info!(path = %path.display(), "converted initial setup to proxy.toml");
+                    parsed
+                } else {
+                    toml::from_str::<ProxyConfigFile>(&content).map_err(|e| {
+                        Error::InvalidString(format!("invalid {}: {e}", path.display()))
+                    })?
+                }
             } else {
                 let parsed = read_proxy_properties(&content).map_err(|e| {
                     Error::InvalidString(format!("invalid {}: {e}", path.display()))
@@ -473,10 +486,20 @@ impl ProxyConfig {
                 parsed
             }
         } else if is_toml {
-            let default_cfg = ProxyConfigFile::default();
-            fs::write(path, default_rad_toml())?;
-            info!(path = %path.display(), "created default rad.toml");
-            default_cfg
+            let legacy_props = path.with_file_name("proxy.properties");
+            let cfg_file = if legacy_props.exists() {
+                let content = fs::read_to_string(&legacy_props)?;
+                let parsed = read_proxy_properties(&content).map_err(|e| {
+                    Error::InvalidString(format!("invalid {}: {e}", legacy_props.display()))
+                })?;
+                info!(from = %legacy_props.display(), to = %path.display(), "migrated proxy.properties to proxy.toml");
+                parsed
+            } else {
+                info!(path = %path.display(), "created default proxy.toml");
+                ProxyConfigFile::default()
+            };
+            fs::write(path, write_proxy_toml(&cfg_file))?;
+            cfg_file
         } else {
             let legacy = path.with_file_name("radproxy.toml");
             let default_cfg = if legacy.exists() {
@@ -685,8 +708,31 @@ fn load_favicon(path_str: &str) -> Option<String> {
     }
 }
 
-fn default_rad_toml() -> String {
-    format!(
+fn toml_str_list(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|s| format!("{:?}", s)).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+fn write_proxy_toml(file: &ProxyConfigFile) -> String {
+    let forwarding = match file.forwarding_mode {
+        ForwardingMode::None => "none",
+        ForwardingMode::Legacy => "legacy",
+        ForwardingMode::BungeeGuard => "bungeeguard",
+        ForwardingMode::Modern => "modern",
+    };
+    let passthrough = match file.ping_passthrough {
+        PingPassthroughMode::None => "none",
+        PingPassthroughMode::Players => "players",
+        PingPassthroughMode::Description => "description",
+        PingPassthroughMode::All => "all",
+    };
+    let lb_strategy = match file.load_balance_strategy {
+        LoadBalanceStrategy::LeastPlayers => "least_players",
+        LoadBalanceStrategy::RoundRobin => "round_robin",
+    };
+
+    let mut out = String::with_capacity(4096);
+    out.push_str(&format!(
         r#"# ==============================================================================
 #  ____      _    ____  ____  ____   ___ __  ____   __
 # |  _ \    / \  |  _ \|  _ \|  _ \ / _ \\ \/ /\ \ / /
@@ -694,78 +740,247 @@ fn default_rad_toml() -> String {
 # |  _ <  / ___ \| |_| |  __/|  _ <| |_| |/  \   | |
 # |_| \_\/_/   \_\____/|_|   |_| \_\\___//_/\_\  |_|
 #
-# radproxy.toml — RadProxy Configuration
+# proxy.toml — RadProxy Configuration (Minecraft 1.7.2 – 26.3+)
 # ==============================================================================
 
-# Configuration schema version (incremented on breaking format changes).
-config_version = {CONFIG_VERSION}
+# Configuration schema version (do not change manually).
+config_version = {config_version}
 
 # --- Network & Authentication -------------------------------------------------
-bind_addr = "0.0.0.0:25565"
-online_mode = false              # Verify players with Mojang + AES-128-CFB8
-haproxy_protocol = false         # Parse HAProxy PROXY v1/v2 headers (TCPShield/nginx)
-connect_timeout_ms = 3000        # Backend TCP connect timeout
+# Address and port the proxy listens on.
+bind_addr = {bind_addr:?}
+# Verify players with Mojang (true = licensed only, false = offline/cracked).
+online_mode = {online_mode}
+# Pass client IP to Mojang hasJoined to block VPN/proxy connections (when online_mode = true).
+prevent_client_proxy_connections = {prevent_proxy}
+# Parse HAProxy PROXY v1/v2 headers (for TCPShield / nginx / Cloudflare Spectrum).
+haproxy_protocol = {haproxy_protocol}
+haproxy_allow_untrusted = {haproxy_allow_untrusted}
+haproxy_trusted_proxies = {haproxy_trusted}
+# Enable TCP Fast Open on Linux listeners.
+tcp_fast_open = {tcp_fast_open}
 
 # --- Forwarding & Plugin Messaging --------------------------------------------
-# "none" | "legacy" | "bungeeguard" | "modern"
-forwarding_mode = "modern"
-forwarding_secret = "change-me-radbyte-secret"
-bungeecord_messaging = true      # Handle `bungeecord:main` plugin channel
-proxy_brand = "RadProxy"         # Custom F3 server brand (optional)
+# Player info forwarding to backend servers:
+#   "none"        - No IP/UUID forwarding (backend must have online-mode=false)
+#   "legacy"      - BungeeCord IP/UUID forwarding (best for 1.7.2 – 1.12.2)
+#   "bungeeguard" - BungeeGuard token forwarding
+#   "modern"      - Velocity Modern Forwarding (recommended for 1.13+ Paper/RadServer)
+forwarding_mode = {forwarding:?}
+# Shared secret for "modern" (Velocity) or "bungeeguard" forwarding.
+forwarding_secret = {forwarding_secret:?}
+"#,
+        config_version = file.config_version,
+        bind_addr = file.bind_addr,
+        online_mode = file.online_mode,
+        prevent_proxy = file.prevent_client_proxy_connections,
+        haproxy_protocol = file.haproxy_protocol,
+        haproxy_allow_untrusted = file.haproxy_allow_untrusted,
+        haproxy_trusted = toml_str_list(
+            &file
+                .haproxy_trusted_proxies
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        ),
+        tcp_fast_open = file.tcp_fast_open,
+        forwarding = forwarding,
+        forwarding_secret = file.forwarding_secret,
+    ));
 
-# --- Server List (MOTD & Ping) ------------------------------------------------
-motd = "RadProxy"
-motds = []                       # Optional rotating MOTD list
-favicon_path = "server-icon.png"
-max_players = 1000
-enforce_max_players = false      # Reject joins when online >= max_players (admins bypass)
-ping_passthrough = "none"        # "none" | "players" | "description" | "all"
-sample_players_in_ping = false   # Show online player names on hover
+    if let Some(ref secret_file) = file.forwarding_secret_file {
+        out.push_str(&format!("forwarding_secret_file = {secret_file:?}\n"));
+    } else {
+        out.push_str("# Optional path to an external secret file (overrides forwarding_secret if present):\n# forwarding_secret_file = \"forwarding.secret\"\n");
+    }
 
-# --- Security, Anti-Bot & Access Control --------------------------------------
-handshake_timeout_ms = 3000
-max_packet_size = 65536
-max_connections_per_ip = 16
-rate_limit_per_sec = 25
-kick_existing_players = true     # Kick old session if same player joins again
-whitelist_enabled = false
-whitelist = []
-banned_players = []
-banned_ips = []
+    if let Some(ref brand) = file.proxy_brand {
+        out.push_str(&format!(
+            "proxy_brand = {brand:?}  # Custom F3 server brand\n"
+        ));
+    } else {
+        out.push_str("# proxy_brand = \"RadProxy\"\n");
+    }
+    out.push_str(&format!(
+        "bungeecord_messaging = {}  # Handle bungeecord:main plugin channel\n\n",
+        file.bungeecord_messaging
+    ));
 
-# --- Permissions & Logging ----------------------------------------------------
+    out.push_str(&format!(
+        r#"# --- Server List (MOTD & Ping) ------------------------------------------------
+motd = {motd:?}
+# Rotating MOTDs (overrides motd when non-empty):
+motds = {motds}
+favicon_path = {favicon_path:?}
+max_players = {max_players}
+enforce_max_players = {enforce_max_players}  # Reject joins when online >= max_players (admins bypass)
+# Ping passthrough from default backend: "none" | "players" | "description" | "all"
+ping_passthrough = {passthrough:?}
+sample_players_in_ping = {sample_players}  # Show online player names on hover
+announce_forge = {announce_forge}          # Advertise Forge FML support in ping
+
+# --- Timeouts, Compression & Anti-Bot Limits ----------------------------------
+handshake_timeout_ms = {handshake_timeout_ms}
+connect_timeout_ms = {connect_timeout_ms}
+read_timeout_ms = {read_timeout_ms}        # Idle read timeout in Play/Config (0 = disabled)
+compression_threshold = {compression_threshold}
+compression_level = {compression_level}
+max_packet_size = {max_packet_size}
+max_connections_per_ip = {max_connections_per_ip}
+rate_limit_per_sec = {rate_limit_per_sec}
+kick_existing_players = {kick_existing_players}
+
+# --- Access Control & Permissions ---------------------------------------------
+whitelist_enabled = {whitelist_enabled}
+whitelist = {whitelist}
+banned_players = {banned_players}
+banned_ips = {banned_ips}
 # Admins can run /send, /alert, /find, /kick, /radproxy and bypass whitelist/limits.
-admins = []
-log_player_connections = true
-log_command_executions = true
+admins = {admins}
 
-# --- Observability & Plugins --------------------------------------------------
-# metrics_bind_addr = "127.0.0.1:9100"   # Optional Prometheus HTTP /metrics endpoint
-radons_dir = "radons"
-radonfigs_dir = "radonfigs"
+# --- Logging, Metrics & Plugins (Radons) --------------------------------------
+log_player_connections = {log_player_connections}
+log_command_executions = {log_command_executions}
+"#,
+        motd = file.motd,
+        motds = toml_str_list(&file.motds),
+        favicon_path = file.favicon_path,
+        max_players = file.max_players,
+        enforce_max_players = file.enforce_max_players,
+        passthrough = passthrough,
+        sample_players = file.sample_players_in_ping,
+        announce_forge = file.announce_forge,
+        handshake_timeout_ms = file.handshake_timeout_ms,
+        connect_timeout_ms = file.connect_timeout_ms,
+        read_timeout_ms = file.read_timeout_ms,
+        compression_threshold = file.compression_threshold,
+        compression_level = file.compression_level,
+        max_packet_size = file.max_packet_size,
+        max_connections_per_ip = file.max_connections_per_ip,
+        rate_limit_per_sec = file.rate_limit_per_sec,
+        kick_existing_players = file.kick_existing_players,
+        whitelist_enabled = file.whitelist_enabled,
+        whitelist = toml_str_list(&file.whitelist),
+        banned_players = toml_str_list(&file.banned_players),
+        banned_ips = toml_str_list(&file.banned_ips),
+        admins = toml_str_list(&file.admins),
+        log_player_connections = file.log_player_connections,
+        log_command_executions = file.log_command_executions,
+    ));
+
+    if let Some(ref metrics) = file.metrics_bind_addr {
+        out.push_str(&format!("metrics_bind_addr = {metrics:?}\n"));
+    } else {
+        out.push_str(
+            "# metrics_bind_addr = \"127.0.0.1:9100\"  # Optional Prometheus /metrics endpoint\n",
+        );
+    }
+    out.push_str(&format!(
+        "radons_dir = {:?}\nradonfigs_dir = {:?}\n\n",
+        file.radons_dir, file.radonfigs_dir
+    ));
+
+    out.push_str(&format!(
+        r#"# --- Seamless Restart (1.20.2+) -----------------------------------------------
+# Hold players in-world and reconnect automatically when a backend restarts.
+seamless_restart = {seamless_restart}
+seamless_restart_timeout_secs = {seamless_restart_timeout_secs}
+seamless_restart_poll_ms = {seamless_restart_poll_ms}
+seamless_restart_freeze = {seamless_restart_freeze}
+seamless_restart_message = {seamless_restart_message:?}
+
+# --- GameSpy4 UDP Query -------------------------------------------------------
+query_enabled = {query_enabled}
+query_port = {query_port}
+query_map = {query_map:?}
+query_show_plugins = {query_show_plugins}
 
 # --- Routing & Backend Servers ------------------------------------------------
-# backend_addr = "127.0.0.1:25566"       # Direct backend (if default_server is unset)
-default_server = "limbo"                 # Default server key from [servers]
-try_servers = ["limbo"]                  # Ordered fallback list from [servers]
-load_balance_strategy = "least_players"  # "least_players" | "round_robin"
+"#,
+        seamless_restart = file.seamless_restart,
+        seamless_restart_timeout_secs = file.seamless_restart_timeout_secs,
+        seamless_restart_poll_ms = file.seamless_restart_poll_ms,
+        seamless_restart_freeze = file.seamless_restart_freeze,
+        seamless_restart_message = file.seamless_restart_message,
+        query_enabled = file.query_enabled,
+        query_port = file.query_port,
+        query_map = file.query_map,
+        query_show_plugins = file.query_show_plugins,
+    ));
 
-[servers]
-limbo = "127.0.0.1:25566"
-# lobby = "127.0.0.1:25567"
-# survival = "127.0.0.1:25568"
+    if let Some(ref backend) = file.backend_addr {
+        out.push_str(&format!(
+            "backend_addr = {backend:?}  # Direct backend (used if set)\n"
+        ));
+    } else {
+        out.push_str("# backend_addr = \"127.0.0.1:25566\"  # Optional direct backend\n");
+    }
+    if let Some(ref def_srv) = file.default_server {
+        out.push_str(&format!("default_server = {def_srv:?}\n"));
+    } else {
+        out.push_str("# default_server = \"lobby\"\n");
+    }
+    out.push_str(&format!(
+        "try_servers = {}  # Fallback order on connect/kick\n",
+        toml_str_list(&file.try_servers)
+    ));
+    out.push_str(&format!(
+        "load_balance_strategy = {lb_strategy:?}  # \"least_players\" | \"round_robin\"\n\n"
+    ));
 
-[server_groups]
-# lobby = ["lobby-1", "lobby-2"]
+    out.push_str("[servers]\n");
+    if file.servers.is_empty() {
+        out.push_str("# lobby = \"127.0.0.1:25566\"\n# survival = \"127.0.0.1:25567\"\n");
+    } else {
+        let mut keys: Vec<_> = file.servers.keys().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(v) = file.servers.get(k) {
+                out.push_str(&format!("{k} = {v:?}\n"));
+            }
+        }
+    }
 
-[forced_hosts]
-# "play.example.com" = "lobby"
-# "survival.example.com" = "survival"
+    out.push_str("\n[server_groups]\n");
+    if file.server_groups.is_empty() {
+        out.push_str("# hub = [\"lobby-1\", \"lobby-2\"]\n");
+    } else {
+        let mut keys: Vec<_> = file.server_groups.keys().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(v) = file.server_groups.get(k) {
+                out.push_str(&format!("{k} = {}\n", toml_str_list(v)));
+            }
+        }
+    }
 
-[restricted_servers]
-# staff = ["AdminName"]
-"#
-    )
+    out.push_str("\n[forced_hosts]\n");
+    if file.forced_hosts.is_empty() {
+        out.push_str("# \"play.example.com\" = \"lobby\"\n");
+    } else {
+        let mut keys: Vec<_> = file.forced_hosts.keys().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(v) = file.forced_hosts.get(k) {
+                out.push_str(&format!("{k:?} = {v:?}\n"));
+            }
+        }
+    }
+
+    out.push_str("\n[restricted_servers]\n");
+    if file.restricted_servers.is_empty() {
+        out.push_str("# staff = [\"AdminName\"]\n");
+    } else {
+        let mut keys: Vec<_> = file.restricted_servers.keys().collect();
+        keys.sort();
+        for k in keys {
+            if let Some(v) = file.restricted_servers.get(k) {
+                out.push_str(&format!("{k} = {}\n", toml_str_list(v)));
+            }
+        }
+    }
+
+    out
 }
 
 fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String, String> {
