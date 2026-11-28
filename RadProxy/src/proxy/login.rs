@@ -66,7 +66,9 @@ pub(super) async fn handle_login(
 
     // Perform online-mode RSA + AES-128-CFB8 + Mojang session authentication if enabled.
     let identity = if cfg.online_mode {
-        match authenticate_online_client(&mut client, &mut read_buf, &login, state, cfg).await {
+        match authenticate_online_client(&mut client, &mut read_buf, &login, peer_addr, state, cfg)
+            .await
+        {
             Ok(id) => id,
             Err(reason) => {
                 send_login_disconnect(&mut client, &reason).await;
@@ -593,6 +595,7 @@ pub(super) async fn authenticate_online_client(
     client: &mut EncryptedStream,
     read_buf: &mut BytesMut,
     login: &LoginStart,
+    peer_addr: SocketAddr,
     state: &ProxyState,
     cfg: &ProxyConfig,
 ) -> std::result::Result<PlayerIdentity, TextComponent> {
@@ -647,7 +650,8 @@ pub(super) async fn authenticate_online_client(
     client.enable_encryption(&secret);
 
     let server_hash = mojang_server_hash("", &secret, &keypair.public_key_der);
-    let profile = verify_mojang_session(&state.http, &login.username, &server_hash)
+    let client_ip = cfg.prevent_client_proxy_connections.then(|| peer_addr.ip());
+    let profile = verify_mojang_session(&state.http, &login.username, &server_hash, client_ip)
         .await
         .map_err(|_| TextComponent::text("Failed to verify username with Mojang.").color("red"))?;
 

@@ -72,10 +72,15 @@ pub async fn verify_mojang_session(
     http: &reqwest::Client,
     username: &str,
     server_hash: &str,
+    client_ip: Option<std::net::IpAddr>,
 ) -> Result<VerifiedProfile> {
-    let url = format!(
+    let mut url = format!(
         "https://sessionserver.mojang.com/session/minecraft/hasJoined?username={username}&serverId={server_hash}"
     );
+    if let Some(ip) = client_ip {
+        use std::fmt::Write;
+        let _ = write!(url, "&ip={ip}");
+    }
     let resp = http
         .get(&url)
         .send()

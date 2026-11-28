@@ -95,11 +95,30 @@ fn main() {
     let online_mode = config.online_mode;
     let server_count = config.servers.len();
     let metrics_bind_addr = config.metrics_bind_addr;
+    let query_enabled = config.query_enabled;
+    let query_addr = std::net::SocketAddr::new(bind_addr.ip(), config.query_port);
+    let _tfo = config.tcp_fast_open;
+    let _comp_threshold = config.compression_threshold;
+    let _comp_level = config.compression_level;
     let radon_count = radons.len();
     let state = Arc::new(
         ProxyState::new(config, radons, keypair)
             .with_config_path(cfg_path.to_string_lossy().into_owned()),
     );
+
+    if query_enabled {
+        let query_state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("rad-query".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build query runtime");
+                rt.block_on(spawn_query_listener(query_addr, query_state));
+            })
+            .expect("failed to spawn query thread");
+    }
 
     if let Some(metrics_addr) = metrics_bind_addr {
         let metrics_state = Arc::clone(&state);
@@ -422,6 +441,96 @@ fn handle_console_command(cmd: &str, state: &ProxyState) -> bool {
             }
             info!(command = other, "unknown command (type 'help')");
             false
+        }
+    }
+}
+
+async fn spawn_query_listener(addr: std::net::SocketAddr, state: Arc<ProxyState>) {
+    let Ok(sock) = tokio::net::UdpSocket::bind(addr).await else {
+        error!(%addr, "failed to bind GameSpy4 UDP query socket");
+        return;
+    };
+    info!(%addr, "GameSpy4 UDP query listener started");
+    let mut buf = [0u8; 1024];
+    let challenge_secret = rand::random::<u32>();
+    loop {
+        let Ok((len, peer)) = sock.recv_from(&mut buf).await else {
+            continue;
+        };
+        if len < 7 || buf[0] != 0xFE || buf[1] != 0xFD {
+            continue;
+        }
+        let pkt_type = buf[2];
+        let session_id = &buf[3..7];
+        let expected_token = (challenge_secret ^ (peer.port() as u32)) as i32;
+        match pkt_type {
+            0x09 => {
+                let mut out = Vec::with_capacity(20);
+                out.push(0x09);
+                out.extend_from_slice(session_id);
+                out.extend_from_slice(expected_token.to_string().as_bytes());
+                out.push(0);
+                let _ = sock.send_to(&out, peer).await;
+            }
+            0x00 if len >= 11 => {
+                let token = i32::from_be_bytes([buf[7], buf[8], buf[9], buf[10]]);
+                if token != expected_token {
+                    continue;
+                }
+                let cfg = state.current_config();
+                let online = state
+                    .online_players
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let mut out = Vec::with_capacity(512);
+                out.push(0x00);
+                out.extend_from_slice(session_id);
+                if len >= 15 {
+                    // Full stat response
+                    out.extend_from_slice(b"splitnum\x00\x80\x00");
+                    let plugins = if cfg.query_show_plugins {
+                        format!("RadProxy {}", env!("CARGO_PKG_VERSION"))
+                    } else {
+                        String::new()
+                    };
+                    let pairs = [
+                        ("hostname", cfg.motd.text.clone()),
+                        ("gametype", "SMP".into()),
+                        ("game_id", "MINECRAFT".into()),
+                        ("version", "1.7.2+".into()),
+                        ("plugins", plugins),
+                        ("map", cfg.query_map.clone()),
+                        ("numplayers", online.to_string()),
+                        ("maxplayers", cfg.max_players.to_string()),
+                        ("hostport", cfg.bind_addr.port().to_string()),
+                        ("hostip", cfg.bind_addr.ip().to_string()),
+                    ];
+                    for (k, v) in pairs {
+                        out.extend_from_slice(k.as_bytes());
+                        out.push(0);
+                        out.extend_from_slice(v.as_bytes());
+                        out.push(0);
+                    }
+                    out.push(0);
+                    out.extend_from_slice(b"\x01player_\x00\x00");
+                    out.push(0);
+                } else {
+                    // Basic stat response
+                    out.extend_from_slice(cfg.motd.text.as_bytes());
+                    out.push(0);
+                    out.extend_from_slice(b"SMP\x00");
+                    out.extend_from_slice(cfg.query_map.as_bytes());
+                    out.push(0);
+                    out.extend_from_slice(online.to_string().as_bytes());
+                    out.push(0);
+                    out.extend_from_slice(cfg.max_players.to_string().as_bytes());
+                    out.push(0);
+                    out.extend_from_slice(&cfg.bind_addr.port().to_le_bytes());
+                    out.extend_from_slice(cfg.bind_addr.ip().to_string().as_bytes());
+                    out.push(0);
+                }
+                let _ = sock.send_to(&out, peer).await;
+            }
+            _ => {}
         }
     }
 }

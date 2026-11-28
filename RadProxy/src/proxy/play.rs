@@ -28,12 +28,17 @@ pub(super) async fn proxy_with_server_switch(
 ) -> ProxyExit {
     let is_admin = cfg.admins.contains(&username.to_ascii_lowercase());
     let mut commands_sent = false;
+    client_buf.reserve(64 * 1024);
+    backend_buf.reserve(64 * 1024);
+    let mut to_backend_out = BytesMut::with_capacity(64 * 1024);
+    let mut to_client_out = BytesMut::with_capacity(64 * 1024);
 
     if !client_buf.is_empty()
         && let Err(exit) = process_client_buf(
             client,
             backend,
             client_buf,
+            &mut to_backend_out,
             client_state,
             &mut backend_state,
             client_compression,
@@ -60,6 +65,7 @@ pub(super) async fn proxy_with_server_switch(
             backend,
             client_buf,
             &mut backend_buf,
+            &mut to_client_out,
             &mut backend_state,
             client_compression,
             backend_compression,
@@ -78,7 +84,10 @@ pub(super) async fn proxy_with_server_switch(
         return exit;
     }
 
+    let mut last_activity = tokio::time::Instant::now();
+
     loop {
+        let read_deadline = cfg.read_timeout.map(|d| last_activity + d);
         tokio::select! {
             ctrl = control_rx.recv() => {
                 if let Some(msg) = ctrl {
@@ -109,15 +118,26 @@ pub(super) async fn proxy_with_server_switch(
                     }
                 }
             }
+            _ = async {
+                if let Some(deadline) = read_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                send_disconnect_for_state(client, *client_state, client_compression, "Timed out").await;
+                return ProxyExit::Closed;
+            }
             res = client.read_buf(client_buf) => {
                 match res {
                     Ok(0) | Err(_) => return ProxyExit::Closed,
-                    Ok(_) => {}
+                    Ok(_) => last_activity = tokio::time::Instant::now(),
                 }
                 if let Err(exit) = process_client_buf(
                     client,
                     backend,
                     client_buf,
+                    &mut to_backend_out,
                     client_state,
                     &mut backend_state,
                     client_compression,
@@ -141,13 +161,14 @@ pub(super) async fn proxy_with_server_switch(
             res = backend.read_buf(&mut backend_buf) => {
                 match res {
                     Ok(0) | Err(_) => return ProxyExit::BackendClosed { kick_reason: None },
-                    Ok(_) => {}
+                    Ok(_) => last_activity = tokio::time::Instant::now(),
                 }
                 if let Err(exit) = process_backend_buf(
                     client,
                     backend,
                     client_buf,
                     &mut backend_buf,
+                    &mut to_client_out,
                     &mut backend_state,
                     client_compression,
                     backend_compression,
@@ -175,6 +196,7 @@ async fn process_client_buf(
     client: &mut EncryptedStream,
     backend: &mut TcpStream,
     client_buf: &mut BytesMut,
+    out: &mut BytesMut,
     client_state: &mut WireState,
     backend_state: &mut WireState,
     client_compression: Option<CompressionConfig>,
@@ -191,9 +213,32 @@ async fn process_client_buf(
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
-    let mut out = BytesMut::new();
+    out.clear();
     let mut just_entered_play = false;
     let same_compression = client_compression == backend_compression;
+
+    if legacy_protocol && same_compression {
+        while let FramePeek::Ready(rel_end) =
+            peek_frame_status(&client_buf[consumed..], cfg.max_packet_size)
+        {
+            consumed += rel_end;
+        }
+        if matches!(
+            peek_frame_status(&client_buf[consumed..], cfg.max_packet_size),
+            FramePeek::Invalid
+        ) || client_buf.len().saturating_sub(consumed) > cfg.max_packet_size.saturating_add(5)
+        {
+            return Err(ProxyExit::Closed);
+        }
+        if consumed > 0 {
+            let write_res = backend.write_all(&client_buf[..consumed]).await;
+            client_buf.advance(consumed);
+            if write_res.is_err() {
+                return Err(ProxyExit::BackendClosed { kick_reason: None });
+            }
+        }
+        return Ok(());
+    }
 
     while let FramePeek::Ready(rel_end) =
         peek_frame_status(&client_buf[consumed..], cfg.max_packet_size)
@@ -248,7 +293,7 @@ async fn process_client_buf(
                     debug!(%username, "executed proxy command");
                 }
                 if !out.is_empty() {
-                    if backend.write_all(&out).await.is_err() {
+                    if backend.write_all(out).await.is_err() {
                         return Err(ProxyExit::BackendClosed { kick_reason: None });
                     }
                     out.clear();
@@ -282,7 +327,7 @@ async fn process_client_buf(
         } else if encode_frame_with_compression(
             pkt.id,
             &pkt.payload,
-            &mut out,
+            out,
             backend_compression.map(|c| c.threshold),
         )
         .is_err()
@@ -302,7 +347,7 @@ async fn process_client_buf(
 
     client_buf.advance(consumed);
 
-    if !out.is_empty() && backend.write_all(&out).await.is_err() {
+    if !out.is_empty() && backend.write_all(out).await.is_err() {
         return Err(ProxyExit::BackendClosed { kick_reason: None });
     }
 
@@ -549,6 +594,7 @@ async fn process_backend_buf(
     backend: &mut TcpStream,
     client_buf: &mut BytesMut,
     backend_buf: &mut BytesMut,
+    out: &mut BytesMut,
     backend_state: &mut WireState,
     client_compression: Option<CompressionConfig>,
     backend_compression: Option<CompressionConfig>,
@@ -563,8 +609,31 @@ async fn process_backend_buf(
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
-    let mut out = BytesMut::new();
+    out.clear();
     let same_compression = client_compression == backend_compression;
+
+    if legacy_protocol && same_compression {
+        while let FramePeek::Ready(rel_end) =
+            peek_frame_status(&backend_buf[consumed..], cfg.max_packet_size)
+        {
+            consumed += rel_end;
+        }
+        if matches!(
+            peek_frame_status(&backend_buf[consumed..], cfg.max_packet_size),
+            FramePeek::Invalid
+        ) || backend_buf.len().saturating_sub(consumed) > cfg.max_packet_size.saturating_add(5)
+        {
+            return Err(ProxyExit::BackendClosed { kick_reason: None });
+        }
+        if consumed > 0 {
+            let write_res = client.write_all(&backend_buf[..consumed]).await;
+            backend_buf.advance(consumed);
+            if write_res.is_err() {
+                return Err(ProxyExit::Closed);
+            }
+        }
+        return Ok(());
+    }
 
     while let FramePeek::Ready(rel_end) =
         peek_frame_status(&backend_buf[consumed..], cfg.max_packet_size)
@@ -594,7 +663,7 @@ async fn process_backend_buf(
                 };
                 if encode_packet_with_compression(
                     &replacement,
-                    &mut out,
+                    out,
                     client_compression.map(|c| c.threshold),
                 )
                 .is_ok()
@@ -622,7 +691,7 @@ async fn process_backend_buf(
                     let merged = merge_declare_commands(backend_cmds, is_admin);
                     if encode_packet_with_compression(
                         &merged,
-                        &mut out,
+                        out,
                         client_compression.map(|c| c.threshold),
                     )
                     .is_ok()
@@ -647,7 +716,7 @@ async fn process_backend_buf(
                     client,
                     backend,
                     client_buf,
-                    &mut out,
+                    out,
                     client_compression,
                     backend_compression,
                     state,
@@ -681,7 +750,7 @@ async fn process_backend_buf(
                         None
                     };
                 if let Some(reason) = kick_reason {
-                    if !out.is_empty() && client.write_all(&out).await.is_err() {
+                    if !out.is_empty() && client.write_all(out).await.is_err() {
                         return Err(ProxyExit::Closed);
                     }
                     backend_buf.advance(frame_end);
@@ -697,7 +766,7 @@ async fn process_backend_buf(
         } else if encode_frame_with_compression(
             pkt.id,
             &pkt.payload,
-            &mut out,
+            out,
             client_compression.map(|c| c.threshold),
         )
         .is_err()
@@ -717,7 +786,7 @@ async fn process_backend_buf(
 
     backend_buf.advance(consumed);
 
-    if !out.is_empty() && client.write_all(&out).await.is_err() {
+    if !out.is_empty() && client.write_all(out).await.is_err() {
         return Err(ProxyExit::Closed);
     }
 

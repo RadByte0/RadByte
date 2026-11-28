@@ -52,6 +52,16 @@ fn test_config(backend_addr: Option<SocketAddr>, forwarding_mode: ForwardingMode
         seamless_restart_poll_ms: 100,
         seamless_restart_freeze: true,
         seamless_restart_message: "Server is restarting, please wait...".into(),
+        read_timeout: Some(Duration::from_secs(30)),
+        prevent_client_proxy_connections: false,
+        announce_forge: false,
+        compression_threshold: 256,
+        compression_level: -1,
+        tcp_fast_open: false,
+        query_enabled: false,
+        query_port: 25577,
+        query_map: "RadProxy".into(),
+        query_show_plugins: false,
     }
 }
 

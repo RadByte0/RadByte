@@ -458,6 +458,9 @@ impl ProxyState {
             description: self.pick_motd(cfg),
             favicon: cfg.favicon.clone(),
             enforces_secure_chat: Some(cfg.online_mode),
+            modinfo: cfg
+                .announce_forge
+                .then(|| serde_json::json!({ "type": "FML", "modList": [] })),
         };
 
         if let Some(backend_payload) = passthrough {

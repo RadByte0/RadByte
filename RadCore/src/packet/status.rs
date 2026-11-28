@@ -123,6 +123,9 @@ pub struct StatusPayload {
     /// Whether the server enforces secure chat profiles.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enforces_secure_chat: Option<bool>,
+    /// Optional Forge modinfo payload when `announce-forge` is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modinfo: Option<serde_json::Value>,
 }
 
 /// Clientbound `Status Response` packet (`0x00`).
@@ -183,6 +186,7 @@ mod tests {
             description: TextComponent::text("RadByte Ecosystem").color("aqua"),
             favicon: None,
             enforces_secure_chat: Some(false),
+            modinfo: None,
         };
 
         let packet = StatusResponse::from_payload(&payload).unwrap();

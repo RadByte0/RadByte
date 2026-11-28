@@ -184,6 +184,59 @@ pub struct ProxyConfigFile {
     /// ActionBar/chat message shown to players while waiting for a restarting backend.
     #[serde(default = "default_seamless_restart_message")]
     pub seamless_restart_message: String,
+    /// Optional path to a file containing the forwarding secret (`forwarding.secret`).
+    #[serde(default)]
+    pub forwarding_secret_file: Option<String>,
+    /// Idle read timeout in milliseconds during active Play/Configuration (`0` = disabled).
+    #[serde(default = "default_read_timeout_ms")]
+    pub read_timeout_ms: u64,
+    /// Pass client IP to Mojang `hasJoined` to block VPN/proxy connections (`online-mode`).
+    #[serde(default)]
+    pub prevent_client_proxy_connections: bool,
+    /// Advertise Forge `FML` modinfo in Status Ping responses.
+    #[serde(default)]
+    pub announce_forge: bool,
+    /// Packet compression threshold in bytes (`256` default, `-1` = disabled).
+    #[serde(default = "default_compression_threshold")]
+    pub compression_threshold: i32,
+    /// Zlib compression level (`-1` = default, `0..=9`).
+    #[serde(default = "default_compression_level")]
+    pub compression_level: i32,
+    /// Enable `TCP_FASTOPEN` on Linux listeners.
+    #[serde(default)]
+    pub tcp_fast_open: bool,
+    /// Enable GameSpy4 UDP Query listener.
+    #[serde(default)]
+    pub query_enabled: bool,
+    /// UDP port for GameSpy4 Query.
+    #[serde(default = "default_query_port")]
+    pub query_port: u16,
+    /// Map name reported in GameSpy4 Query.
+    #[serde(default = "default_query_map")]
+    pub query_map: String,
+    /// Whether to include loaded radons in GameSpy4 Query plugins list.
+    #[serde(default)]
+    pub query_show_plugins: bool,
+}
+
+fn default_read_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_compression_threshold() -> i32 {
+    256
+}
+
+fn default_compression_level() -> i32 {
+    -1
+}
+
+fn default_query_port() -> u16 {
+    25577
+}
+
+fn default_query_map() -> String {
+    "RadProxy".into()
 }
 
 fn default_connect_timeout_ms() -> u64 {
@@ -266,6 +319,17 @@ impl Default for ProxyConfigFile {
             seamless_restart_poll_ms: default_seamless_restart_poll_ms(),
             seamless_restart_freeze: true,
             seamless_restart_message: default_seamless_restart_message(),
+            forwarding_secret_file: None,
+            read_timeout_ms: default_read_timeout_ms(),
+            prevent_client_proxy_connections: false,
+            announce_forge: false,
+            compression_threshold: default_compression_threshold(),
+            compression_level: default_compression_level(),
+            tcp_fast_open: false,
+            query_enabled: false,
+            query_port: default_query_port(),
+            query_map: default_query_map(),
+            query_show_plugins: false,
         }
     }
 }
@@ -363,6 +427,26 @@ pub struct ProxyConfig {
     pub seamless_restart_freeze: bool,
     /// ActionBar/chat message shown to players while waiting for a restarting backend.
     pub seamless_restart_message: String,
+    /// Idle read timeout during active Play/Configuration (`None` = disabled).
+    pub read_timeout: Option<Duration>,
+    /// Pass client IP to Mojang `hasJoined` to block VPN/proxy connections.
+    pub prevent_client_proxy_connections: bool,
+    /// Advertise Forge `FML` modinfo in Status Ping responses.
+    pub announce_forge: bool,
+    /// Packet compression threshold in bytes (`-1` = disabled).
+    pub compression_threshold: i32,
+    /// Zlib compression level (`-1` = default, `0..=9`).
+    pub compression_level: i32,
+    /// Enable `TCP_FASTOPEN` on Linux listeners.
+    pub tcp_fast_open: bool,
+    /// Enable GameSpy4 UDP Query listener.
+    pub query_enabled: bool,
+    /// UDP port for GameSpy4 Query.
+    pub query_port: u16,
+    /// Map name reported in GameSpy4 Query.
+    pub query_map: String,
+    /// Whether to include loaded radons in GameSpy4 Query plugins list.
+    pub query_show_plugins: bool,
 }
 
 impl ProxyConfig {
@@ -497,6 +581,12 @@ impl ProxyConfig {
             })
             .collect();
 
+        let forwarding_secret = resolve_forwarding_secret(
+            path,
+            raw.forwarding_secret_file.as_deref(),
+            &raw.forwarding_secret,
+        )?;
+
         Ok(Self {
             config_version: raw.config_version,
             bind_addr,
@@ -508,7 +598,7 @@ impl ProxyConfig {
             haproxy_trusted_proxies: raw.haproxy_trusted_proxies.into_iter().collect(),
             haproxy_allow_untrusted: raw.haproxy_allow_untrusted,
             forwarding_mode: raw.forwarding_mode,
-            forwarding_secret: raw.forwarding_secret.into_bytes(),
+            forwarding_secret,
             online_mode: raw.online_mode,
             motd: TextComponent::text(raw.motd).color("aqua"),
             motds,
@@ -559,6 +649,21 @@ impl ProxyConfig {
             } else {
                 raw.seamless_restart_message
             },
+            read_timeout: (raw.read_timeout_ms > 0)
+                .then(|| Duration::from_millis(raw.read_timeout_ms)),
+            prevent_client_proxy_connections: raw.prevent_client_proxy_connections,
+            announce_forge: raw.announce_forge,
+            compression_threshold: raw.compression_threshold,
+            compression_level: raw.compression_level,
+            tcp_fast_open: raw.tcp_fast_open,
+            query_enabled: raw.query_enabled,
+            query_port: raw.query_port,
+            query_map: if raw.query_map.trim().is_empty() {
+                default_query_map()
+            } else {
+                raw.query_map
+            },
+            query_show_plugins: raw.query_show_plugins,
         })
     }
 }
@@ -728,6 +833,22 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
     out.push_str("# Proxy forwarding and plugin channels\n");
     out.push_str(&format!("forwarding-mode={forwarding}\n"));
     out.push_str(&format!("forwarding-secret={}\n", file.forwarding_secret));
+    if let Some(ref secret_file) = file.forwarding_secret_file {
+        out.push_str(&format!("forwarding-secret-file={secret_file}\n"));
+    } else {
+        out.push_str("# forwarding-secret-file=forwarding.secret\n");
+    }
+    out.push_str(&format!("announce-forge={}\n", file.announce_forge));
+    out.push_str(&format!(
+        "prevent-client-proxy-connections={}\n",
+        file.prevent_client_proxy_connections
+    ));
+    out.push_str(&format!(
+        "compression-threshold={}\n",
+        file.compression_threshold
+    ));
+    out.push_str(&format!("compression-level={}\n", file.compression_level));
+    out.push_str(&format!("tcp-fast-open={}\n", file.tcp_fast_open));
     if let Some(ref brand) = file.proxy_brand {
         out.push_str(&format!("proxy-brand={brand}\n"));
     } else {
@@ -744,6 +865,7 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
         file.handshake_timeout_ms
     ));
     out.push_str(&format!("connect-timeout-ms={}\n", file.connect_timeout_ms));
+    out.push_str(&format!("read-timeout-ms={}\n", file.read_timeout_ms));
     out.push_str(&format!("max-packet-size={}\n", file.max_packet_size));
     out.push_str(&format!(
         "max-connections-per-ip={}\n",
@@ -866,6 +988,13 @@ fn write_proxy_properties(file: &ProxyConfigFile) -> std::result::Result<String,
         "seamless-restart-message={}\n",
         file.seamless_restart_message
     ));
+    out.push('\n');
+
+    out.push_str("# GameSpy4 UDP Query\n");
+    out.push_str(&format!("query-enabled={}\n", file.query_enabled));
+    out.push_str(&format!("query-port={}\n", file.query_port));
+    out.push_str(&format!("query-map={}\n", file.query_map));
+    out.push_str(&format!("query-show-plugins={}\n", file.query_show_plugins));
     Ok(out)
 }
 
@@ -1152,6 +1281,57 @@ fn read_proxy_properties(raw: &str) -> std::result::Result<ProxyConfigFile, Stri
             "seamless-restart-message" => {
                 cfg.seamless_restart_message = val.to_owned();
             }
+            "forwarding-secret-file" => {
+                cfg.forwarding_secret_file = (!val.is_empty()).then(|| val.to_owned());
+            }
+            "read-timeout-ms" => {
+                cfg.read_timeout_ms = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid read-timeout-ms", idx + 1))?;
+            }
+            "prevent-client-proxy-connections" => {
+                cfg.prevent_client_proxy_connections = val.parse().map_err(|_| {
+                    format!("line {}: invalid prevent-client-proxy-connections", idx + 1)
+                })?;
+            }
+            "announce-forge" => {
+                cfg.announce_forge = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid announce-forge", idx + 1))?;
+            }
+            "compression-threshold" => {
+                cfg.compression_threshold = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid compression-threshold", idx + 1))?;
+            }
+            "compression-level" => {
+                cfg.compression_level = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid compression-level", idx + 1))?;
+            }
+            "tcp-fast-open" => {
+                cfg.tcp_fast_open = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid tcp-fast-open", idx + 1))?;
+            }
+            "query-enabled" => {
+                cfg.query_enabled = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid query-enabled", idx + 1))?;
+            }
+            "query-port" => {
+                cfg.query_port = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid query-port", idx + 1))?;
+            }
+            "query-map" => {
+                cfg.query_map = val.to_owned();
+            }
+            "query-show-plugins" => {
+                cfg.query_show_plugins = val
+                    .parse()
+                    .map_err(|_| format!("line {}: invalid query-show-plugins", idx + 1))?;
+            }
             k if k.starts_with("auto-update") || k.starts_with("auto_update") => {}
             other => {
                 return Err(format!("line {}: unknown property '{other}'", idx + 1));
@@ -1174,6 +1354,35 @@ fn read_proxy_properties(raw: &str) -> std::result::Result<ProxyConfigFile, Stri
     }
 
     Ok(cfg)
+}
+
+fn resolve_forwarding_secret(
+    config_path: &Path,
+    secret_file: Option<&str>,
+    inline_secret: &str,
+) -> Result<Vec<u8>> {
+    if let Some(rel) = secret_file.map(str::trim).filter(|s| !s.is_empty()) {
+        let candidate = Path::new(rel);
+        let resolved = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            config_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+                .join(candidate)
+        };
+        if resolved.exists() {
+            let content = fs::read_to_string(&resolved)?;
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.as_bytes().to_vec());
+            }
+        } else if !inline_secret.is_empty() {
+            let _ = fs::write(&resolved, inline_secret);
+        }
+    }
+    Ok(inline_secret.as_bytes().to_vec())
 }
 
 #[cfg(test)]
