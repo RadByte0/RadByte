@@ -84,19 +84,32 @@ pub fn run_startup_auto_update(cfg_path: &Path) {
     if is_auto_update_launcher_enabled(cfg_path) && has_newer {
         let asset = format!("rad-limbo-{target}{exe_ext}");
         let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
-        if let Ok(resp) = client.get(&url).send().and_then(|r| r.error_for_status()) {
-            let mut bytes = Vec::new();
-            if resp
-                .take(64 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .is_ok()
-                && !bytes.is_empty()
-                && bytes.len() <= 64 * 1024 * 1024
-            {
-                tracing::info!(tag = %latest_tag, "auto-updated RadLimbo; restarting");
-                if let Err(e) = replace_current_binary_and_restart(&bytes) {
-                    tracing::warn!(error = %e, "RadLimbo self-update failed");
+        let dl_client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .user_agent(concat!("RadLimbo/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| client.clone());
+        match dl_client
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(resp) => {
+                let mut bytes = Vec::new();
+                if let Err(e) = resp.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes) {
+                    tracing::warn!(error = %e, "RadLimbo update download failed");
+                } else if !bytes.is_empty() && bytes.len() <= 64 * 1024 * 1024 {
+                    tracing::info!(tag = %latest_tag, "auto-updated RadLimbo; restarting");
+                    if let Err(e) = replace_current_binary_and_restart(&bytes) {
+                        tracing::warn!(error = %e, "RadLimbo self-update failed");
+                    }
+                } else {
+                    tracing::warn!(size = bytes.len(), "RadLimbo update payload invalid size");
                 }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, %url, "failed to download RadLimbo update");
             }
         }
     }
@@ -141,7 +154,8 @@ fn check_radon_updates(client: &reqwest::blocking::Client, radons_dir: &Path) {
 /// Downloads and stages a newer `RadLimbo` binary in the background while running.
 pub fn check_and_stage_in_background() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
         .user_agent(concat!("RadLimbo/", env!("CARGO_PKG_VERSION")))
         .build()
         .ok()?;

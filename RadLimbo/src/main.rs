@@ -177,10 +177,15 @@ async fn async_main() {
                         info!(%bind_addr, ?forwarding, "RadLimbo online");
                     }
                     "update" => {
-                        if rad_core::auto_update::has_staged_binary_update()
-                            || auto_update::check_and_stage_in_background().is_some()
-                        {
+                        let ready = rad_core::auto_update::has_staged_binary_update()
+                            || tokio::task::spawn_blocking(auto_update::check_and_stage_in_background)
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some();
+                        if ready {
                             info!("applying update and restarting RadLimbo...");
+                            drop(listener);
                             if let Err(e) = rad_core::auto_update::apply_staged_binary_and_restart()
                             {
                                 error!(error = %e, "failed to apply staged update");

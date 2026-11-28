@@ -104,10 +104,21 @@ pub fn run_startup_auto_update(cfg_path: &Path, work_dir: &Path, versions_dir: &
     if is_auto_update_launcher_enabled(cfg_path) && has_newer {
         let asset = format!("rad-server-{target}{exe_ext}");
         let url = format!("https://github.com/{repo}/releases/download/{latest_tag}/{asset}");
-        if let Ok(bytes) = download_bytes(&client, &url, 64 * 1024 * 1024) {
-            tracing::info!(tag = %latest_tag, "auto-updated RadServer; restarting");
-            if let Err(e) = replace_current_binary_and_restart(&bytes) {
-                tracing::warn!(error = %e, "RadServer self-update failed");
+        let dl_client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .user_agent(concat!("RadServer/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| client.clone());
+        match download_bytes(&dl_client, &url, 64 * 1024 * 1024) {
+            Ok(bytes) => {
+                tracing::info!(tag = %latest_tag, "auto-updated RadServer; restarting");
+                if let Err(e) = replace_current_binary_and_restart(&bytes) {
+                    tracing::warn!(error = %e, "RadServer self-update failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, %url, "failed to download RadServer update");
             }
         }
     }
