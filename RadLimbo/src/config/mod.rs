@@ -174,15 +174,7 @@ impl LimboConfig {
                         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
                 }
             } else {
-                let legacy_props = path.with_file_name("limbo.properties");
-                let defaults = if legacy_props.exists() {
-                    let raw = std::fs::read_to_string(&legacy_props)
-                        .map_err(|e| format!("failed to read {}: {e}", legacy_props.display()))?;
-                    read_limbo_properties(&raw)
-                        .map_err(|e| format!("failed to parse {}: {e}", legacy_props.display()))?
-                } else {
-                    LimboConfigFile::default()
-                };
+                let defaults = LimboConfigFile::default();
                 std::fs::write(path, write_limbo_toml(&defaults))
                     .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
                 defaults

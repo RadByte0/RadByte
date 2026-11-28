@@ -92,10 +92,7 @@ async fn async_main() {
         &rad_cfg_path,
         &["server-port=", "forwarding-mode="],
     );
-    let legacy_props = cfg_path.with_file_name("limbo.properties");
-    if (cfg_path.exists() || !legacy_props.exists())
-        && let Err(err) = rad_core::setup_ui::ensure_limbo_setup(&cfg_path)
-    {
+    if let Err(err) = rad_core::setup_ui::ensure_limbo_setup(&cfg_path) {
         error!(%err, "limbo setup cancelled");
         exit_with_pause(1);
     }

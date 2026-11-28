@@ -486,22 +486,7 @@ impl ServerConfig {
                         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
                 }
             } else {
-                let legacy_props = path.with_file_name("server.properties");
-                let file = if legacy_props.exists() {
-                    let mut raw = std::fs::read_to_string(&legacy_props)
-                        .map_err(|e| format!("failed to read {}: {e}", legacy_props.display()))?;
-                    let extra_path = extra_config_path(&legacy_props)?;
-                    if extra_path.exists() {
-                        raw.push('\n');
-                        raw.push_str(&std::fs::read_to_string(&extra_path).map_err(|e| {
-                            format!("failed to read {}: {e}", extra_path.display())
-                        })?);
-                    }
-                    read_properties(&raw)
-                        .map_err(|e| format!("failed to parse {}: {e}", legacy_props.display()))?
-                } else {
-                    ServerConfigFile::default()
-                };
+                let file = ServerConfigFile::default();
                 std::fs::write(path, write_server_toml(&file))
                     .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
                 file

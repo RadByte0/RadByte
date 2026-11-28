@@ -486,19 +486,9 @@ impl ProxyConfig {
                 parsed
             }
         } else if is_toml {
-            let legacy_props = path.with_file_name("proxy.properties");
-            let cfg_file = if legacy_props.exists() {
-                let content = fs::read_to_string(&legacy_props)?;
-                let parsed = read_proxy_properties(&content).map_err(|e| {
-                    Error::InvalidString(format!("invalid {}: {e}", legacy_props.display()))
-                })?;
-                info!(from = %legacy_props.display(), to = %path.display(), "migrated proxy.properties to proxy.toml");
-                parsed
-            } else {
-                info!(path = %path.display(), "created default proxy.toml");
-                ProxyConfigFile::default()
-            };
+            let cfg_file = ProxyConfigFile::default();
             fs::write(path, write_proxy_toml(&cfg_file))?;
+            info!(path = %path.display(), "created default proxy.toml");
             cfg_file
         } else {
             let legacy = path.with_file_name("radproxy.toml");
