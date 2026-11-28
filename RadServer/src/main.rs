@@ -44,7 +44,7 @@ fn main() {
 
     print_startup_banner("RadServer", env!("CARGO_PKG_VERSION"), "");
 
-    let server_cfg_path = resolve_config_path("server.properties");
+    let server_cfg_path = resolve_config_path("server.toml");
     let work_dir = server_cfg_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

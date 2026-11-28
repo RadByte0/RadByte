@@ -154,13 +154,39 @@ impl LimboConfig {
         })
     }
 
-    /// Loads `rad.properties` from disk (migrating legacy `radlimbo.toml` if present) or writes defaults on first start.
+    /// Loads `limbo.toml` / `limbo.properties` from disk (migrating legacy formats if present) or writes defaults on first start.
     pub fn load_or_create(path: &Path) -> Result<Self, String> {
         if path.extension().is_some_and(|ext| ext == "toml") {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-            let parsed: LimboConfigFile = toml::from_str(&raw)
-                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+            let parsed = if path.exists() {
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                if raw
+                    .trim_start_matches('\u{feff}')
+                    .starts_with("# RadByte configuration")
+                {
+                    let migrated = read_limbo_properties(&raw)
+                        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+                    std::fs::write(path, write_limbo_toml(&migrated))
+                        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+                    migrated
+                } else {
+                    toml::from_str::<LimboConfigFile>(&raw)
+                        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
+                }
+            } else {
+                let legacy_props = path.with_file_name("limbo.properties");
+                let defaults = if legacy_props.exists() {
+                    let raw = std::fs::read_to_string(&legacy_props)
+                        .map_err(|e| format!("failed to read {}: {e}", legacy_props.display()))?;
+                    read_limbo_properties(&raw)
+                        .map_err(|e| format!("failed to parse {}: {e}", legacy_props.display()))?
+                } else {
+                    LimboConfigFile::default()
+                };
+                std::fs::write(path, write_limbo_toml(&defaults))
+                    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+                defaults
+            };
             return Self::from_file_struct(parsed);
         }
         if !path.exists() {
@@ -185,6 +211,77 @@ impl LimboConfig {
             .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
         Self::from_file_struct(parsed)
     }
+}
+
+fn write_limbo_toml(file: &LimboConfigFile) -> String {
+    let forwarding = match file.forwarding_mode {
+        LimboForwardingMode::None => "none",
+        LimboForwardingMode::Legacy => "legacy",
+        LimboForwardingMode::BungeeGuard => "bungeeguard",
+        LimboForwardingMode::Modern => "modern",
+    };
+    let mut out = format!(
+        r#"# ==============================================================================
+#  ____      _    ____  _     ___ __  __ ____   ___
+# |  _ \    / \  |  _ \| |   |_ _|  \/  | __ ) / _ \
+# | |_) |  / _ \ | | | | |    | || |\/| |  _ \| | | |
+# |  _ <  / ___ \| |_| | |___ | || |  | | |_) | |_| |
+# |_| \_\/_/   \_\____/|_____|___|_|  |_|____/ \___/
+#
+# limbo.toml — RadLimbo Configuration (Minecraft 26.3 / protocol 777)
+# ==============================================================================
+
+config_version = {config_version}
+
+# --- Network & Proxy Forwarding -----------------------------------------------
+bind_addr = {bind_addr:?}
+# Expected forwarding from RadProxy/Velocity: "modern" | "legacy" | "bungeeguard" | "none"
+forwarding_mode = {forwarding:?}
+forwarding_secret = {forwarding_secret:?}
+
+# --- Waiting Room & Gameplay --------------------------------------------------
+motd = {motd:?}
+max_players = {max_players}
+view_distance = {view_distance}
+# 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator
+game_mode = {game_mode}
+
+# --- Spawn Coordinates --------------------------------------------------------
+spawn_x = {spawn_x}
+spawn_y = {spawn_y}
+spawn_z = {spawn_z}
+
+# --- Messages, Reconnect & Limits ---------------------------------------------
+brand = {brand:?}
+keep_alive_interval_secs = {keep_alive}
+max_packet_size = {max_packet_size}
+"#,
+        config_version = file.config_version,
+        bind_addr = file.bind_addr,
+        forwarding = forwarding,
+        forwarding_secret = file.forwarding_secret,
+        motd = file.motd,
+        max_players = file.max_players,
+        view_distance = file.view_distance,
+        game_mode = file.game_mode,
+        spawn_x = file.spawn_x,
+        spawn_y = file.spawn_y,
+        spawn_z = file.spawn_z,
+        brand = file.brand,
+        keep_alive = file.keep_alive_interval_secs,
+        max_packet_size = file.max_packet_size,
+    );
+    if let Some(ref msg) = file.welcome_message {
+        out.push_str(&format!("welcome_message = {msg:?}\n"));
+    } else {
+        out.push_str("# welcome_message = \"You are in the waiting room.\"\n");
+    }
+    if let Some(ref srv) = file.reconnect_server {
+        out.push_str(&format!("reconnect_server = {srv:?}\n"));
+    } else {
+        out.push_str("# reconnect_server = \"lobby\"\n");
+    }
+    out
 }
 
 fn write_limbo_properties(file: &LimboConfigFile) -> Result<String, String> {

@@ -468,12 +468,44 @@ impl ServerConfig {
 
     /// Loads properties, migrating a sibling legacy TOML file when necessary.
     pub fn load_or_create(path: &Path) -> Result<Self, String> {
-        // Explicit legacy --config paths retain their previous meaning.
         if path.extension().is_some_and(|ext| ext == "toml") {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-            let file: ServerConfigFile = toml::from_str(&raw)
-                .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+            let file = if path.exists() {
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+                if raw
+                    .trim_start_matches('\u{feff}')
+                    .starts_with("# RadByte configuration")
+                {
+                    let migrated = read_properties(&raw)
+                        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+                    std::fs::write(path, write_server_toml(&migrated))
+                        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+                    migrated
+                } else {
+                    toml::from_str::<ServerConfigFile>(&raw)
+                        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?
+                }
+            } else {
+                let legacy_props = path.with_file_name("server.properties");
+                let file = if legacy_props.exists() {
+                    let mut raw = std::fs::read_to_string(&legacy_props)
+                        .map_err(|e| format!("failed to read {}: {e}", legacy_props.display()))?;
+                    let extra_path = extra_config_path(&legacy_props)?;
+                    if extra_path.exists() {
+                        raw.push('\n');
+                        raw.push_str(&std::fs::read_to_string(&extra_path).map_err(|e| {
+                            format!("failed to read {}: {e}", extra_path.display())
+                        })?);
+                    }
+                    read_properties(&raw)
+                        .map_err(|e| format!("failed to parse {}: {e}", legacy_props.display()))?
+                } else {
+                    ServerConfigFile::default()
+                };
+                std::fs::write(path, write_server_toml(&file))
+                    .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+                file
+            };
             return Self::from_file_struct(file);
         }
         if !path.exists() {
@@ -533,6 +565,134 @@ impl ServerConfig {
                 .map_err(|e| format!("failed to parse {}: {e}", path.display()))?,
         )
     }
+}
+
+fn write_server_toml(file: &ServerConfigFile) -> String {
+    let forwarding = match file.forwarding_mode {
+        ServerForwardingMode::None => "none",
+        ServerForwardingMode::Legacy => "legacy",
+        ServerForwardingMode::BungeeGuard => "bungeeguard",
+        ServerForwardingMode::Modern => "modern",
+    };
+    let admins: Vec<String> = file.admins.iter().map(|a| format!("{a:?}")).collect();
+    let mut out = format!(
+        r#"# ==============================================================================
+#  ____      _    ____  ____  _____ ______     _______ ____
+# |  _ \    / \  |  _ \/ ___|| ____|  _ \ \   / / ____|  _ \
+# | |_) |  / _ \ | | | \___ \|  _| | |_) \ \ / /|  _| | |_) |
+# |  _ <  / ___ \| |_| |___) | |___|  _ < \ V / | |___|  _ <
+# |_| \_\/_/   \_\____/|____/|_____|_| \_\ \_/  |_____|_| \_\
+#
+# server.toml — RadServer Configuration (Minecraft 26.3 / protocol 777)
+# ==============================================================================
+
+config_version = {config_version}
+
+# --- Network & Proxy Forwarding -----------------------------------------------
+bind_addr = {bind_addr:?}
+# Expected forwarding from RadProxy/Velocity: "modern" | "legacy" | "bungeeguard" | "none"
+forwarding_mode = {forwarding:?}
+forwarding_secret = {forwarding_secret:?}
+
+# --- Server List & Status -----------------------------------------------------
+motd = {motd:?}
+max_players = {max_players}
+enable_status = {enable_status}
+hide_online_players = {hide_online_players}
+
+# --- World, Gameplay & Performance --------------------------------------------
+level_name = {level_name:?}
+# "flat" | "seeded"
+world_type = {world_type:?}
+world_seed = {world_seed}
+max_world_size = {max_world_size}
+view_distance = {view_distance}
+tps = {tps}
+# 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator
+game_mode = {game_mode}
+force_gamemode = {force_gamemode}
+# 0 = Peaceful, 1 = Easy, 2 = Normal, 3 = Hard
+difficulty = {difficulty}
+hardcore = {hardcore}
+pvp = {pvp}
+spawn_x = {spawn_x}
+spawn_y = {spawn_y}
+spawn_z = {spawn_z}
+spawn_protection = {spawn_protection}
+max_mobs = {max_mobs}
+autosave_interval_secs = {autosave}
+
+# --- Access Control, Permissions & Messages -----------------------------------
+admins = [{admins}]
+enforce_whitelist = {enforce_whitelist}
+op_permission_level = {op_level}
+player_idle_timeout = {idle_timeout}
+brand = {brand:?}
+
+# --- Timeouts & Packet Limits -------------------------------------------------
+max_packet_size = {max_packet_size}
+login_timeout_secs = {login_timeout}
+forwarding_timeout_secs = {forwarding_timeout}
+configuration_timeout_secs = {config_timeout}
+play_read_timeout_secs = {play_timeout}
+"#,
+        config_version = file.config_version,
+        bind_addr = file.bind_addr,
+        forwarding = forwarding,
+        forwarding_secret = file.forwarding_secret,
+        motd = file.motd,
+        max_players = file.max_players,
+        enable_status = file.enable_status,
+        hide_online_players = file.hide_online_players,
+        level_name = file.level_name,
+        world_type = file.world_type,
+        world_seed = file.world_seed,
+        max_world_size = file.max_world_size,
+        view_distance = file.view_distance,
+        tps = file.tps,
+        game_mode = file.game_mode,
+        force_gamemode = file.force_gamemode,
+        difficulty = file.difficulty,
+        hardcore = file.hardcore,
+        pvp = file.pvp,
+        spawn_x = file.spawn_x,
+        spawn_y = file.spawn_y,
+        spawn_z = file.spawn_z,
+        spawn_protection = file.spawn_protection,
+        max_mobs = file.max_mobs,
+        autosave = file.autosave_interval_secs,
+        admins = admins.join(", "),
+        enforce_whitelist = file.enforce_whitelist,
+        op_level = file.op_permission_level,
+        idle_timeout = file.player_idle_timeout,
+        brand = file.brand,
+        max_packet_size = file.max_packet_size,
+        login_timeout = file.login_timeout_secs,
+        forwarding_timeout = file.forwarding_timeout_secs,
+        config_timeout = file.configuration_timeout_secs,
+        play_timeout = file.play_read_timeout_secs,
+    );
+    if let Some(sim) = file.simulation_distance {
+        out.push_str(&format!("simulation_distance = {sim}\n"));
+    } else {
+        out.push_str("# simulation_distance = 10\n");
+    }
+    if let Some(wl) = file.white_list {
+        out.push_str(&format!("white_list = {wl}\n"));
+    } else {
+        out.push_str("# white_list = false\n");
+    }
+    if let Some(ref msg) = file.welcome_message {
+        out.push_str(&format!("welcome_message = {msg:?}\n"));
+    } else {
+        out.push_str("# welcome_message = \"Welcome to RadServer!\"\n");
+    }
+    if let Some(ref lobby) = file.lobby_server {
+        out.push_str(&format!("lobby_server = {lobby:?}\n"));
+    } else {
+        out.push_str("# lobby_server = \"lobby\"\n");
+    }
+    out
 }
 
 fn extra_config_path(path: &Path) -> Result<std::path::PathBuf, String> {
