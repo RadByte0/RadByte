@@ -19,11 +19,17 @@ pub fn print_startup_banner(product_name: &str, crate_version: &str, _ascii_art:
     }
     let mut out = String::with_capacity(1024);
     crate::console_ui::append_radbyte_logo(&mut out);
-    out.push_str(&format!(
-        "  \x1b[1;37m{product_name}\x1b[0m \x1b[38;2;232;125;13mv{crate_version}\x1b[0m \x1b[90m|\x1b[0m Minecraft {} \x1b[90m(protocol {})\x1b[0m\n",
-        crate::MINECRAFT_VERSION,
-        crate::PROTOCOL_VERSION
-    ));
+    if product_name == "RadProxy" {
+        out.push_str(&format!(
+            "  \x1b[1;37m{product_name}\x1b[0m \x1b[38;2;232;125;13mv{crate_version}\x1b[0m \x1b[90m|\x1b[0m Minecraft 1.7.2+ \x1b[90m(multi-version)\x1b[0m\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "  \x1b[1;37m{product_name}\x1b[0m \x1b[38;2;232;125;13mv{crate_version}\x1b[0m \x1b[90m|\x1b[0m Minecraft {} \x1b[90m(protocol {})\x1b[0m\n",
+            crate::MINECRAFT_VERSION,
+            crate::PROTOCOL_VERSION
+        ));
+    }
     println!("{out}");
 }
 

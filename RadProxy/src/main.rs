@@ -15,7 +15,6 @@ use std::sync::atomic::Ordering;
 
 use rad_core::cli::{exit_with_pause, print_startup_banner, resolve_config_path};
 use rad_core::console_ui::{ConsoleUi, make_log_writer};
-use rad_core::{MINECRAFT_VERSION, PROTOCOL_VERSION};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -144,13 +143,12 @@ fn run_thread_per_core(
         %bind_addr,
         workers,
         mode = "thread-per-core",
-        mc_version = MINECRAFT_VERSION,
-        protocol = PROTOCOL_VERSION,
         online_mode,
         radons = radon_count,
         servers = server_count,
         "Done ({elapsed:.2}s)! For help, type \"help\""
     );
+    println!("Done ({elapsed:.2}s)! For help, type \"help\"");
 
     for idx in 0..workers {
         let state = Arc::clone(&state);
@@ -223,13 +221,12 @@ fn run_multi_thread(
         info!(
             %bind_addr,
             mode = "multi-thread",
-            mc_version = MINECRAFT_VERSION,
-            protocol = PROTOCOL_VERSION,
             online_mode,
             radons = radon_count,
             servers = server_count,
             "Done ({elapsed:.2}s)! For help, type \"help\""
         );
+        println!("Done ({elapsed:.2}s)! For help, type \"help\"");
 
         let accept_state = Arc::clone(&state);
         tokio::spawn(async move {

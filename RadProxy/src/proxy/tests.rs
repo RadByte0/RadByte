@@ -1877,3 +1877,83 @@ async fn e2e_velocity_protocol_version_passthrough() {
     assert_eq!(ls.username, "ProtoTester");
     backend_task.await.unwrap();
 }
+
+#[tokio::test]
+async fn e2e_legacy_1_7_2_login_and_play_passthrough() {
+    const PROTO_1_7_2: i32 = 4;
+
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend_listener.local_addr().unwrap();
+    let backend_task = tokio::spawn(async move {
+        let (mut sock, _) = backend_listener.accept().await.unwrap();
+        let mut buf = BytesMut::new();
+        let hs: Handshake = read_next_frame(&mut sock, &mut buf, 65536)
+            .await
+            .unwrap()
+            .unwrap()
+            .decode_as()
+            .unwrap();
+        assert_eq!(hs.protocol_version, VarInt(PROTO_1_7_2));
+
+        let login_frame = read_next_frame(&mut sock, &mut buf, 65536)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(login_frame.id, LoginStart::ID);
+        let mut p = &login_frame.payload[..];
+        let user = rad_core::types::read_string(&mut p, 16).unwrap();
+        assert_eq!(user, "Steve172");
+        assert!(p.is_empty());
+
+        // Send 1.7.2-style LoginSuccess (string UUID + username, no properties).
+        let mut ls_payload = BytesMut::new();
+        rad_core::types::write_string(&mut ls_payload, "00000000-0000-0000-0000-000000000000", 36)
+            .unwrap();
+        rad_core::types::write_string(&mut ls_payload, "Steve172", 16).unwrap();
+        let mut b_out = BytesMut::new();
+        encode_frame_with_compression(LoginSuccess::ID, &ls_payload, &mut b_out, None).unwrap();
+        // Immediately send a Play frame (no LoginAcknowledged / Configuration in 1.7.2).
+        encode_frame_with_compression(0x01, b"\x00\x00\x00\x01", &mut b_out, None).unwrap();
+        sock.write_all(&b_out).await.unwrap();
+    });
+
+    let cfg = test_config(Some(backend_addr), ForwardingMode::None);
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let state = Arc::new(ProxyState::new(cfg, RadonManager::new(), None));
+    tokio::spawn(async move {
+        let (stream, peer) = proxy_listener.accept().await.unwrap();
+        handle_connection(stream, peer, state).await;
+    });
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut out = BytesMut::new();
+    encode_packet(
+        &Handshake {
+            protocol_version: VarInt(PROTO_1_7_2),
+            server_address: "localhost".into(),
+            server_port: proxy_addr.port(),
+            next_state: ConnectionState::Login,
+        },
+        &mut out,
+    )
+    .unwrap();
+    let mut login_payload = BytesMut::new();
+    rad_core::types::write_string(&mut login_payload, "Steve172", 16).unwrap();
+    encode_frame_with_compression(LoginStart::ID, &login_payload, &mut out, None).unwrap();
+    client.write_all(&out).await.unwrap();
+
+    let mut in_buf = BytesMut::new();
+    let ls = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ls.id, LoginSuccess::ID);
+    let play = read_next_frame(&mut client, &mut in_buf, 65536)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(play.id, 0x01);
+    assert_eq!(&play.payload[..], b"\x00\x00\x00\x01");
+    backend_task.await.unwrap();
+}

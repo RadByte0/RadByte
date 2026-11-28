@@ -23,6 +23,7 @@ pub(super) async fn proxy_with_server_switch(
     control_rx: &mut mpsc::UnboundedReceiver<PlayerControl>,
     last_pos: &mut PlayerHoldPos,
     player_lang: &mut PlayerLocaleState,
+    legacy_protocol: bool,
     cfg: &ProxyConfig,
 ) -> ProxyExit {
     let is_admin = cfg.admins.contains(&username.to_ascii_lowercase());
@@ -45,6 +46,7 @@ pub(super) async fn proxy_with_server_switch(
             current_server,
             last_pos,
             player_lang,
+            legacy_protocol,
             cfg,
         )
         .await
@@ -68,6 +70,7 @@ pub(super) async fn proxy_with_server_switch(
             username,
             current_server,
             last_pos,
+            legacy_protocol,
             cfg,
         )
         .await
@@ -127,6 +130,7 @@ pub(super) async fn proxy_with_server_switch(
                     current_server,
                     last_pos,
                     player_lang,
+                    legacy_protocol,
                     cfg,
                 )
                 .await
@@ -154,6 +158,7 @@ pub(super) async fn proxy_with_server_switch(
                     username,
                     current_server,
                     last_pos,
+                    legacy_protocol,
                     cfg,
                 )
                 .await
@@ -182,6 +187,7 @@ async fn process_client_buf(
     current_server: Option<&str>,
     last_pos: &mut PlayerHoldPos,
     player_lang: &mut PlayerLocaleState,
+    legacy_protocol: bool,
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
@@ -198,75 +204,77 @@ async fn process_client_buf(
             return Err(ProxyExit::Closed);
         };
 
-        if ((*client_state == WireState::Configuration && pkt.id == 0x00)
-            || (*client_state == WireState::Play && pkt.id == 0x0E))
-            && let Some(locale) = rad_core::i18n::decode_client_locale(&pkt.payload)
-        {
-            player_lang.detected = rad_core::i18n::ClientLang::from_locale(&locale);
-        }
-
-        if *client_state == WireState::Play {
-            if pkt.id == MovePlayerPos::ID
-                && let Ok(mv) = MovePlayerPos::decode_body(&mut &pkt.payload[..])
+        if !legacy_protocol {
+            if ((*client_state == WireState::Configuration && pkt.id == 0x00)
+                || (*client_state == WireState::Play && pkt.id == 0x0E))
+                && let Some(locale) = rad_core::i18n::decode_client_locale(&pkt.payload)
             {
-                last_pos.x = mv.x;
-                last_pos.y = mv.y;
-                last_pos.z = mv.z;
-                last_pos.valid = true;
-            } else if pkt.id == MovePlayerPosRot::ID
-                && let Ok(mv) = MovePlayerPosRot::decode_body(&mut &pkt.payload[..])
-            {
-                last_pos.x = mv.x;
-                last_pos.y = mv.y;
-                last_pos.z = mv.z;
-                last_pos.yaw = mv.yaw;
-                last_pos.pitch = mv.pitch;
-                last_pos.valid = true;
+                player_lang.detected = rad_core::i18n::ClientLang::from_locale(&locale);
             }
-        }
 
-        if *client_state == WireState::Login && pkt.id == LoginAcknowledged::ID {
-            *client_state = WireState::Configuration;
-            *backend_state = WireState::Configuration;
-        } else if *client_state == WireState::Configuration
-            && pkt.id == AcknowledgeFinishConfiguration::ID
-        {
-            *client_state = WireState::Play;
-            just_entered_play = true;
-        } else if *client_state == WireState::Play
-            && pkt.id == ChatCommand::ID
-            && let Some(cmd) = parse_proxy_command_payload(&pkt.payload)
-        {
-            if cfg.log_command_executions {
-                debug!(%username, "executed proxy command");
-            }
-            if !out.is_empty() {
-                if backend.write_all(&out).await.is_err() {
-                    return Err(ProxyExit::BackendClosed { kick_reason: None });
+            if *client_state == WireState::Play {
+                if pkt.id == MovePlayerPos::ID
+                    && let Ok(mv) = MovePlayerPos::decode_body(&mut &pkt.payload[..])
+                {
+                    last_pos.x = mv.x;
+                    last_pos.y = mv.y;
+                    last_pos.z = mv.z;
+                    last_pos.valid = true;
+                } else if pkt.id == MovePlayerPosRot::ID
+                    && let Ok(mv) = MovePlayerPosRot::decode_body(&mut &pkt.payload[..])
+                {
+                    last_pos.x = mv.x;
+                    last_pos.y = mv.y;
+                    last_pos.z = mv.z;
+                    last_pos.yaw = mv.yaw;
+                    last_pos.pitch = mv.pitch;
+                    last_pos.valid = true;
                 }
-                out.clear();
             }
 
-            if let Some(exit) = handle_proxy_command(
-                cmd,
-                client,
-                client_buf,
-                frame_end,
-                client_state,
-                client_compression,
-                is_admin,
-                state,
-                username,
-                current_server,
-                player_lang,
-                cfg,
-            )
-            .await
+            if *client_state == WireState::Login && pkt.id == LoginAcknowledged::ID {
+                *client_state = WireState::Configuration;
+                *backend_state = WireState::Configuration;
+            } else if *client_state == WireState::Configuration
+                && pkt.id == AcknowledgeFinishConfiguration::ID
             {
-                return Err(exit);
+                *client_state = WireState::Play;
+                just_entered_play = true;
+            } else if *client_state == WireState::Play
+                && pkt.id == ChatCommand::ID
+                && let Some(cmd) = parse_proxy_command_payload(&pkt.payload)
+            {
+                if cfg.log_command_executions {
+                    debug!(%username, "executed proxy command");
+                }
+                if !out.is_empty() {
+                    if backend.write_all(&out).await.is_err() {
+                        return Err(ProxyExit::BackendClosed { kick_reason: None });
+                    }
+                    out.clear();
+                }
+
+                if let Some(exit) = handle_proxy_command(
+                    cmd,
+                    client,
+                    client_buf,
+                    frame_end,
+                    client_state,
+                    client_compression,
+                    is_admin,
+                    state,
+                    username,
+                    current_server,
+                    player_lang,
+                    cfg,
+                )
+                .await
+                {
+                    return Err(exit);
+                }
+                consumed = frame_end;
+                continue;
             }
-            consumed = frame_end;
-            continue;
         }
 
         if same_compression {
@@ -498,7 +506,7 @@ async fn handle_proxy_command(
             } else {
                 let snap = state.metrics.snapshot();
                 format!(
-                    "RadProxy (MC {MINECRAFT_VERSION}) | Online: {} | Connections: {} | Switches: {}",
+                    "RadProxy | Online: {} | Connections: {} | Switches: {}",
                     state.online_players.load(Ordering::Relaxed),
                     snap.total_connections,
                     snap.server_switches
@@ -551,6 +559,7 @@ async fn process_backend_buf(
     username: &str,
     current_server: Option<&str>,
     last_pos: &mut PlayerHoldPos,
+    legacy_protocol: bool,
     cfg: &ProxyConfig,
 ) -> std::result::Result<(), ProxyExit> {
     let mut consumed = 0usize;
@@ -567,51 +576,24 @@ async fn process_backend_buf(
             return Err(ProxyExit::BackendClosed { kick_reason: None });
         };
 
-        if *backend_state == WireState::Configuration && pkt.id == FinishConfiguration::ID {
-            *backend_state = WireState::Play;
-        }
-
-        if *backend_state == WireState::Configuration
-            && pkt.id == ConfigClientboundPluginMessage::ID
-            && let Some(ref brand) = cfg.proxy_brand
-            && let Ok(plugin_pkt) =
-                ConfigClientboundPluginMessage::decode_body(&mut &pkt.payload[..])
-            && plugin_pkt.channel == "minecraft:brand"
-        {
-            let replacement = ConfigClientboundPluginMessage {
-                channel: plugin_pkt.channel,
-                data: encode_brand_payload(brand),
-            };
-            if encode_packet_with_compression(
-                &replacement,
-                &mut out,
-                client_compression.map(|c| c.threshold),
-            )
-            .is_ok()
-            {
-                consumed = frame_end;
-                continue;
+        if !legacy_protocol {
+            if *backend_state == WireState::Configuration && pkt.id == FinishConfiguration::ID {
+                *backend_state = WireState::Play;
             }
-        }
 
-        if *backend_state == WireState::Play
-            && pkt.id == SynchronizePlayerPosition::ID
-            && let Ok(pos) = SynchronizePlayerPosition::decode_body(&mut &pkt.payload[..])
-        {
-            last_pos.x = pos.x;
-            last_pos.y = pos.y;
-            last_pos.z = pos.z;
-            last_pos.yaw = pos.yaw;
-            last_pos.pitch = pos.pitch;
-            last_pos.valid = true;
-        }
-
-        if *backend_state == WireState::Play && pkt.id == DeclareCommands::ID {
-            *commands_sent = true;
-            if let Ok(backend_cmds) = DeclareCommands::decode_body(&mut &pkt.payload[..]) {
-                let merged = merge_declare_commands(backend_cmds, is_admin);
+            if *backend_state == WireState::Configuration
+                && pkt.id == ConfigClientboundPluginMessage::ID
+                && let Some(ref brand) = cfg.proxy_brand
+                && let Ok(plugin_pkt) =
+                    ConfigClientboundPluginMessage::decode_body(&mut &pkt.payload[..])
+                && plugin_pkt.channel == "minecraft:brand"
+            {
+                let replacement = ConfigClientboundPluginMessage {
+                    channel: plugin_pkt.channel,
+                    data: encode_brand_payload(brand),
+                };
                 if encode_packet_with_compression(
-                    &merged,
+                    &replacement,
                     &mut out,
                     client_compression.map(|c| c.threshold),
                 )
@@ -621,61 +603,92 @@ async fn process_backend_buf(
                     continue;
                 }
             }
-        }
 
-        if *backend_state == WireState::Play
-            && cfg.bungeecord_messaging
-            && pkt.id == PlayClientboundPluginMessage::ID
-            && let Ok(plugin_pkt) = PlayClientboundPluginMessage::decode_body(&mut &pkt.payload[..])
-            && (plugin_pkt.channel == "bungeecord:main" || plugin_pkt.channel == "BungeeCord")
-            && let Some(req) = parse_bungee_request(&plugin_pkt.data)
-        {
-            if let Some(exit) = dispatch_bungee_request(
-                req,
-                &plugin_pkt.channel,
-                client,
-                backend,
-                client_buf,
-                &mut out,
-                client_compression,
-                backend_compression,
-                state,
-                peer_addr,
-                username,
-                current_server,
-                cfg,
-            )
-            .await
+            if *backend_state == WireState::Play
+                && pkt.id == SynchronizePlayerPosition::ID
+                && let Ok(pos) = SynchronizePlayerPosition::decode_body(&mut &pkt.payload[..])
             {
-                backend_buf.advance(frame_end);
-                return Err(exit);
+                last_pos.x = pos.x;
+                last_pos.y = pos.y;
+                last_pos.z = pos.z;
+                last_pos.yaw = pos.yaw;
+                last_pos.pitch = pos.pitch;
+                last_pos.valid = true;
             }
-            consumed = frame_end;
-            continue;
-        }
 
-        if !cfg.try_servers.is_empty() || cfg.seamless_restart {
-            let kick_reason = if *backend_state == WireState::Play && pkt.id == PlayDisconnect::ID {
-                PlayDisconnect::decode_body(&mut &pkt.payload[..])
-                    .ok()
-                    .map(|p| format_nbt_reason(p.reason))
-            } else if *backend_state == WireState::Configuration
-                && pkt.id == ConfigurationDisconnect::ID
-            {
-                ConfigurationDisconnect::decode_body(&mut &pkt.payload[..])
-                    .ok()
-                    .map(|p| format_nbt_reason(p.reason))
-            } else {
-                None
-            };
-            if let Some(reason) = kick_reason {
-                if !out.is_empty() && client.write_all(&out).await.is_err() {
-                    return Err(ProxyExit::Closed);
+            if *backend_state == WireState::Play && pkt.id == DeclareCommands::ID {
+                *commands_sent = true;
+                if let Ok(backend_cmds) = DeclareCommands::decode_body(&mut &pkt.payload[..]) {
+                    let merged = merge_declare_commands(backend_cmds, is_admin);
+                    if encode_packet_with_compression(
+                        &merged,
+                        &mut out,
+                        client_compression.map(|c| c.threshold),
+                    )
+                    .is_ok()
+                    {
+                        consumed = frame_end;
+                        continue;
+                    }
                 }
-                backend_buf.advance(frame_end);
-                return Err(ProxyExit::BackendClosed {
-                    kick_reason: Some(reason),
-                });
+            }
+
+            if *backend_state == WireState::Play
+                && cfg.bungeecord_messaging
+                && pkt.id == PlayClientboundPluginMessage::ID
+                && let Ok(plugin_pkt) =
+                    PlayClientboundPluginMessage::decode_body(&mut &pkt.payload[..])
+                && (plugin_pkt.channel == "bungeecord:main" || plugin_pkt.channel == "BungeeCord")
+                && let Some(req) = parse_bungee_request(&plugin_pkt.data)
+            {
+                if let Some(exit) = dispatch_bungee_request(
+                    req,
+                    &plugin_pkt.channel,
+                    client,
+                    backend,
+                    client_buf,
+                    &mut out,
+                    client_compression,
+                    backend_compression,
+                    state,
+                    peer_addr,
+                    username,
+                    current_server,
+                    cfg,
+                )
+                .await
+                {
+                    backend_buf.advance(frame_end);
+                    return Err(exit);
+                }
+                consumed = frame_end;
+                continue;
+            }
+
+            if !cfg.try_servers.is_empty() || cfg.seamless_restart {
+                let kick_reason =
+                    if *backend_state == WireState::Play && pkt.id == PlayDisconnect::ID {
+                        PlayDisconnect::decode_body(&mut &pkt.payload[..])
+                            .ok()
+                            .map(|p| format_nbt_reason(p.reason))
+                    } else if *backend_state == WireState::Configuration
+                        && pkt.id == ConfigurationDisconnect::ID
+                    {
+                        ConfigurationDisconnect::decode_body(&mut &pkt.payload[..])
+                            .ok()
+                            .map(|p| format_nbt_reason(p.reason))
+                    } else {
+                        None
+                    };
+                if let Some(reason) = kick_reason {
+                    if !out.is_empty() && client.write_all(&out).await.is_err() {
+                        return Err(ProxyExit::Closed);
+                    }
+                    backend_buf.advance(frame_end);
+                    return Err(ProxyExit::BackendClosed {
+                        kick_reason: Some(reason),
+                    });
+                }
             }
         }
 

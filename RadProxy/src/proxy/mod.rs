@@ -447,7 +447,7 @@ impl ProxyState {
 
         let mut payload = StatusPayload {
             version: StatusVersion {
-                name: format!("RadByte {MINECRAFT_VERSION}"),
+                name: "RadProxy 1.7.2+".to_owned(),
                 protocol: client_protocol,
             },
             players: Some(StatusPlayers {

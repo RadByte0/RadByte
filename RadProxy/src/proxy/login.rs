@@ -24,8 +24,26 @@ pub(super) async fn handle_login(
         _ => return,
     };
 
-    let Ok(login) = login_frame.decode_as::<LoginStart>() else {
-        return;
+    let legacy_protocol = handshake.protocol_version.0 < 764;
+    let login = if legacy_protocol {
+        let mut p = &login_frame.payload[..];
+        let Ok(username) = rad_core::types::read_string(&mut p, LoginStart::MAX_USERNAME_LEN)
+        else {
+            return;
+        };
+        let player_uuid = Uuid::new_v3(
+            &Uuid::NAMESPACE_OID,
+            format!("OfflinePlayer:{username}").as_bytes(),
+        );
+        LoginStart {
+            username,
+            player_uuid,
+        }
+    } else {
+        let Ok(login) = login_frame.decode_as::<LoginStart>() else {
+            return;
+        };
+        login
     };
 
     let ctx = RadonContext {
@@ -171,10 +189,20 @@ pub(super) async fn handle_login(
         // Replay Handshake + LoginStart to the backend (with optional Legacy/BungeeGuard forwarding).
         let forwarded_handshake = format_forwarded_handshake(handshake, peer_addr, &identity, cfg);
         let mut initial_out = BytesMut::with_capacity(256);
-        if encode_packet(&forwarded_handshake, &mut initial_out).is_err()
-            || encode_packet(&login, &mut initial_out).is_err()
-            || backend.write_all(&initial_out).await.is_err()
-        {
+        if encode_packet(&forwarded_handshake, &mut initial_out).is_err() {
+            break;
+        }
+        let login_encoded = if legacy_protocol {
+            encode_frame_with_compression(
+                LoginStart::ID,
+                &login_frame.payload,
+                &mut initial_out,
+                None,
+            )
+        } else {
+            encode_packet(&login, &mut initial_out)
+        };
+        if login_encoded.is_err() || backend.write_all(&initial_out).await.is_err() {
             break;
         }
 
@@ -200,7 +228,12 @@ pub(super) async fn handle_login(
                 break;
             };
             client_compression = backend_comp;
-            (backend_comp, buf, WireState::Login)
+            if legacy_protocol {
+                client_state = WireState::Play;
+                (backend_comp, buf, WireState::Play)
+            } else {
+                (backend_comp, buf, WireState::Login)
+            }
         };
 
         if let Some(ref server_name) = current_server {
@@ -226,6 +259,7 @@ pub(super) async fn handle_login(
             &mut control_rx,
             &mut last_pos,
             &mut player_lang,
+            legacy_protocol,
             cfg,
         )
         .await;

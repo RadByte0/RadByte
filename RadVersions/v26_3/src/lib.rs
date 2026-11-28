@@ -167,6 +167,7 @@ pub fn run_server(cfg_path: &Path, versions_dir: &Path) -> i32 {
             config = %cfg_path.display(),
             "Done ({elapsed:.2}s)! For help, type \"help\""
         );
+        println!("Done ({elapsed:.2}s)! For help, type \"help\"");
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         rad_core::console_ui::spawn_command_reader(move |line| {
