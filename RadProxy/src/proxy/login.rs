@@ -773,6 +773,19 @@ pub(super) async fn negotiate_initial_backend_login(
                 }
                 return (!is_disconnect).then_some((compression, backend_buf));
             }
+            EncryptionRequest::ID => {
+                warn!(
+                    %peer_addr,
+                    player = %identity.username,
+                    "backend server sent EncryptionRequest; backend servers behind RadProxy must have online-mode=false"
+                );
+                let reason = TextComponent::text(
+                    "Backend server has online-mode=true. Set online-mode=false on the backend server.",
+                )
+                .color("red");
+                send_login_disconnect(client, &reason).await;
+                return None;
+            }
             _ => {
                 let mut out = BytesMut::new();
                 if encode_frame_with_compression(
@@ -887,6 +900,14 @@ async fn complete_backend_login_for_switch(
                 return Some((backend_compression, backend_buf));
             }
             LoginDisconnect::ID => return None,
+            EncryptionRequest::ID => {
+                warn!(
+                    %peer_addr,
+                    player = %identity.username,
+                    "backend server sent EncryptionRequest; backend servers behind RadProxy must have online-mode=false"
+                );
+                return None;
+            }
             _ => {}
         }
     }

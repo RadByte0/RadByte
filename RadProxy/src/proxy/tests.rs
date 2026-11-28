@@ -1715,12 +1715,15 @@ async fn e2e_seamless_restart_freezes_player_and_reconnects() {
     .unwrap();
     client.write_all(&out).await.unwrap();
 
-    let freeze_pos2: SynchronizePlayerPosition = read_next_frame(&mut client, &mut in_buf, 65536)
-        .await
-        .unwrap()
-        .unwrap()
-        .decode_as()
-        .unwrap();
+    let freeze_pos2: SynchronizePlayerPosition = loop {
+        let frame = read_next_frame(&mut client, &mut in_buf, 65536)
+            .await
+            .unwrap()
+            .unwrap();
+        if frame.id == SynchronizePlayerPosition::ID {
+            break frame.decode_as().unwrap();
+        }
+    };
     assert_eq!(freeze_pos2.x, 10.5);
     assert_eq!(freeze_pos2.z, -3.5);
 
