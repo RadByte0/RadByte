@@ -25,9 +25,7 @@ pub fn print_startup_banner(product_name: &str, crate_version: &str, _ascii_art:
         ));
     } else {
         out.push_str(&format!(
-            "  \x1b[1;37m{product_name}\x1b[0m \x1b[38;2;232;125;13mv{crate_version}\x1b[0m \x1b[90m|\x1b[0m Minecraft {} \x1b[90m(protocol {})\x1b[0m\n",
-            crate::MINECRAFT_VERSION,
-            crate::PROTOCOL_VERSION
+            "  \x1b[1;37m{product_name}\x1b[0m \x1b[38;2;232;125;13mv{crate_version}\x1b[0m\n"
         ));
     }
     println!("{out}");

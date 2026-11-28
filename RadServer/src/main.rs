@@ -86,6 +86,11 @@ fn main() {
                 exit_with_pause(1);
             }
         };
+    info!(
+        mc_version = %version_package.manifest().game_version,
+        protocol = version_package.manifest().protocol_version,
+        "loaded Minecraft version package"
+    );
 
     if let Err(e) = version_download::install_missing(&version_package) {
         error!(error = %e, "failed to install missing version library");

@@ -601,11 +601,15 @@ fn append_pixel_header(
     _width: usize,
 ) {
     append_radbyte_logo(out);
-    out.push_str(&format!(
-        "\x1b[2K  \x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m  \x1b[90m•  Minecraft {} (protocol {})\x1b[0m\n",
-        crate::MINECRAFT_VERSION,
-        crate::PROTOCOL_VERSION
-    ));
+    if product == "RadProxy" {
+        out.push_str(&format!(
+            "\x1b[2K  \x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m  \x1b[90m•  Minecraft 1.7.2+\x1b[0m\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "\x1b[2K  \x1b[1;37m{product} CLI\x1b[0m \x1b[38;2;232;125;13mv{version}\x1b[0m\n"
+        ));
+    }
     out.push_str(&format!(
         "\x1b[2K  \x1b[32m●\x1b[0m \x1b[37mOnline\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;232;125;13mCPU {cpu_pct:.1}%\x1b[0m  \x1b[90m•\x1b[0m  \x1b[38;2;245;158;11mRAM {ram_mb:.1} MB\x1b[0m  \x1b[90m•  {hint}  •  Scroll: Mouse/PgUp/PgDn\x1b[0m\n"
     ));
