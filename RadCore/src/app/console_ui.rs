@@ -309,23 +309,7 @@ fn read_process_cpu_ns() -> u64 {
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        #[repr(C)]
-        #[derive(Default)]
-        struct TimeVal {
-            tv_sec: i64,
-            tv_usec: i64,
-        }
-        #[repr(C)]
-        struct RUsage {
-            ru_utime: TimeVal,
-            ru_stime: TimeVal,
-            _rest: [i64; 14],
-        }
-        unsafe extern "C" {
-            fn getrusage(who: i32, usage: *mut RUsage) -> i32;
-        }
-        let mut ru = unsafe { std::mem::zeroed::<RUsage>() };
-        if unsafe { getrusage(0, &raw mut ru) } == 0 {
+        if let Some(ru) = read_unix_rusage() {
             let u_ns = (ru.ru_utime.tv_sec.max(0) as u64) * 1_000_000_000
                 + (ru.ru_utime.tv_usec.max(0) as u64) * 1_000;
             let s_ns = (ru.ru_stime.tv_sec.max(0) as u64) * 1_000_000_000
@@ -334,6 +318,32 @@ fn read_process_cpu_ns() -> u64 {
         }
         0
     }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+#[repr(C)]
+#[derive(Default)]
+struct UnixTimeVal {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+#[repr(C)]
+struct UnixRUsage {
+    ru_utime: UnixTimeVal,
+    ru_stime: UnixTimeVal,
+    ru_maxrss: i64,
+    _rest: [i64; 13],
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn read_unix_rusage() -> Option<UnixRUsage> {
+    unsafe extern "C" {
+        fn getrusage(who: i32, usage: *mut UnixRUsage) -> i32;
+    }
+    let mut ru = unsafe { std::mem::zeroed::<UnixRUsage>() };
+    (unsafe { getrusage(0, &raw mut ru) } == 0).then_some(ru)
 }
 
 fn read_process_rss_bytes() -> u64 {
@@ -390,27 +400,7 @@ fn read_process_rss_bytes() -> u64 {
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        #[repr(C)]
-        #[derive(Default)]
-        struct TimeVal {
-            tv_sec: i64,
-            tv_usec: i64,
-        }
-        #[repr(C)]
-        struct RUsage {
-            ru_utime: TimeVal,
-            ru_stime: TimeVal,
-            ru_maxrss: i64,
-            _rest: [i64; 13],
-        }
-        unsafe extern "C" {
-            fn getrusage(who: i32, usage: *mut RUsage) -> i32;
-        }
-        let mut ru = unsafe { std::mem::zeroed::<RUsage>() };
-        if unsafe { getrusage(0, &raw mut ru) } == 0 {
-            return ru.ru_maxrss.max(0) as u64;
-        }
-        0
+        read_unix_rusage().map_or(0, |ru| ru.ru_maxrss.max(0) as u64)
     }
 }
 

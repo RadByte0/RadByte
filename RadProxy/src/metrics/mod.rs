@@ -6,7 +6,7 @@
 //! was visible during review, so this is not a formal clean-room claim or a legal
 //! clearance. Its archived copy remains in `NU/RadProxy/src/metrics/mod.rs`.
 //!
-//! API reference: https://doc.rust-lang.org/std/sync/atomic/
+//! API reference: <https://doc.rust-lang.org/std/sync/atomic/>
 
 pub mod http;
 

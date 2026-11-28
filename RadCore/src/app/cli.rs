@@ -3,8 +3,8 @@
 //! Replacement authored in this chat on 2026-11-15 from the required interface
 //! and standard-library API documentation. The prior file was accessible and
 //! is archived under `NU/RadCore/src/app/cli.rs`; no clean-room status is claimed.
-//! Sources: https://doc.rust-lang.org/std/env/fn.args_os.html and
-//! https://doc.rust-lang.org/std/path/struct.PathBuf.html .
+//! Sources: <https://doc.rust-lang.org/std/env/fn.args_os.html> and
+//! <https://doc.rust-lang.org/std/path/struct.PathBuf.html> .
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;

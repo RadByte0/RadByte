@@ -32,7 +32,7 @@ pub enum MigrationStatus {
     QuarantinedAmbiguous,
 }
 
-/// Detailed report produced by [`migrate_legacy_world`].
+/// Detailed report produced by `migrate_legacy_world`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct MigrationReport {
