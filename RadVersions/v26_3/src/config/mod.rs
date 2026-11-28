@@ -559,7 +559,6 @@ fn write_server_toml(file: &ServerConfigFile) -> String {
         ServerForwardingMode::BungeeGuard => "bungeeguard",
         ServerForwardingMode::Modern => "modern",
     };
-    let admins: Vec<String> = file.admins.iter().map(|a| format!("{a:?}")).collect();
     let mut out = format!(
         r#"# ==============================================================================
 #  ____      _    ____  ____  _____ ______     _______ ____
@@ -568,27 +567,26 @@ fn write_server_toml(file: &ServerConfigFile) -> String {
 # |  _ <  / ___ \| |_| |___) | |___|  _ < \ V / | |___|  _ <
 # |_| \_\/_/   \_\____/|____/|_____|_| \_\ \_/  |_____|_| \_\
 #
-# server.toml — RadServer Configuration (Minecraft 26.3 / protocol 777)
+# server.toml — RadServer Configuration
 # ==============================================================================
 
 config_version = {config_version}
 
-# --- Network & Proxy Forwarding -----------------------------------------------
+# === Network & Proxy Forwarding ===============================================
 bind_addr = {bind_addr:?}
-# Expected forwarding from RadProxy/Velocity: "modern" | "legacy" | "bungeeguard" | "none"
+# Proxy forwarding: "none" | "legacy" (BungeeCord) | "bungeeguard" | "modern" (Velocity)
 forwarding_mode = {forwarding:?}
 forwarding_secret = {forwarding_secret:?}
 
-# --- Server List & Status -----------------------------------------------------
+# === Server List & Status =====================================================
 motd = {motd:?}
 max_players = {max_players}
 enable_status = {enable_status}
 hide_online_players = {hide_online_players}
 
-# --- World, Gameplay & Performance --------------------------------------------
+# === World & Gameplay =========================================================
 level_name = {level_name:?}
-# "flat" | "seeded"
-world_type = {world_type:?}
+world_type = {world_type:?}                  # "flat" | "seeded"
 world_seed = {world_seed}
 max_world_size = {max_world_size}
 view_distance = {view_distance}
@@ -607,14 +605,14 @@ spawn_protection = {spawn_protection}
 max_mobs = {max_mobs}
 autosave_interval_secs = {autosave}
 
-# --- Access Control, Permissions & Messages -----------------------------------
-admins = [{admins}]
+# === Access Control & Branding ================================================
+# Note: Use `/op <player>` in the server console to manage operators (ops.json).
 enforce_whitelist = {enforce_whitelist}
 op_permission_level = {op_level}
-player_idle_timeout = {idle_timeout}
+player_idle_timeout = {idle_timeout}          # Minutes before idle kick (0 = disabled)
 brand = {brand:?}
 
-# --- Timeouts & Packet Limits -------------------------------------------------
+# === Advanced & Timeouts ======================================================
 max_packet_size = {max_packet_size}
 login_timeout_secs = {login_timeout}
 forwarding_timeout_secs = {forwarding_timeout}
@@ -646,7 +644,6 @@ play_read_timeout_secs = {play_timeout}
         spawn_protection = file.spawn_protection,
         max_mobs = file.max_mobs,
         autosave = file.autosave_interval_secs,
-        admins = admins.join(", "),
         enforce_whitelist = file.enforce_whitelist,
         op_level = file.op_permission_level,
         idle_timeout = file.player_idle_timeout,
@@ -657,6 +654,10 @@ play_read_timeout_secs = {play_timeout}
         config_timeout = file.configuration_timeout_secs,
         play_timeout = file.play_read_timeout_secs,
     );
+    if !file.admins.is_empty() {
+        let admins: Vec<String> = file.admins.iter().map(|a| format!("{a:?}")).collect();
+        out.push_str(&format!("admins = [{}]\n", admins.join(", ")));
+    }
     if let Some(sim) = file.simulation_distance {
         out.push_str(&format!("simulation_distance = {sim}\n"));
     } else {

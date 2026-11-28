@@ -220,30 +220,30 @@ fn write_limbo_toml(file: &LimboConfigFile) -> String {
 # |  _ <  / ___ \| |_| | |___ | || |  | | |_) | |_| |
 # |_| \_\/_/   \_\____/|_____|___|_|  |_|____/ \___/
 #
-# limbo.toml — RadLimbo Configuration (Minecraft 26.3 / protocol 777)
+# limbo.toml — RadLimbo Configuration
 # ==============================================================================
 
 config_version = {config_version}
 
-# --- Network & Proxy Forwarding -----------------------------------------------
+# === Network & Proxy Forwarding ===============================================
 bind_addr = {bind_addr:?}
-# Expected forwarding from RadProxy/Velocity: "modern" | "legacy" | "bungeeguard" | "none"
+# Proxy forwarding: "none" | "legacy" (BungeeCord) | "bungeeguard" | "modern" (Velocity)
 forwarding_mode = {forwarding:?}
 forwarding_secret = {forwarding_secret:?}
 
-# --- Waiting Room & Gameplay --------------------------------------------------
+# === Waiting Room & Gameplay ==================================================
 motd = {motd:?}
 max_players = {max_players}
 view_distance = {view_distance}
 # 0 = Survival, 1 = Creative, 2 = Adventure, 3 = Spectator
 game_mode = {game_mode}
 
-# --- Spawn Coordinates --------------------------------------------------------
+# === Spawn Coordinates ========================================================
 spawn_x = {spawn_x}
 spawn_y = {spawn_y}
 spawn_z = {spawn_z}
 
-# --- Messages, Reconnect & Limits ---------------------------------------------
+# === Branding, Reconnect & Advanced ===========================================
 brand = {brand:?}
 keep_alive_interval_secs = {keep_alive}
 max_packet_size = {max_packet_size}

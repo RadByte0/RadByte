@@ -736,7 +736,7 @@ fn write_proxy_toml(file: &ProxyConfigFile) -> String {
 # Configuration schema version (do not change manually).
 config_version = {config_version}
 
-# --- Network & Authentication -------------------------------------------------
+# === Network & Authentication =================================================
 # Address and port the proxy listens on.
 bind_addr = {bind_addr:?}
 # Verify players with Mojang (true = licensed only, false = offline/cracked).
@@ -750,7 +750,7 @@ haproxy_trusted_proxies = {haproxy_trusted}
 # Enable TCP Fast Open on Linux listeners.
 tcp_fast_open = {tcp_fast_open}
 
-# --- Forwarding & Plugin Messaging --------------------------------------------
+# === Forwarding & Plugin Messaging ============================================
 # Player info forwarding to backend servers:
 #   "none"        - No IP/UUID forwarding (backend must have online-mode=false)
 #   "legacy"      - BungeeCord IP/UUID forwarding (best for 1.7.2 – 1.12.2)
@@ -797,7 +797,7 @@ forwarding_secret = {forwarding_secret:?}
     ));
 
     out.push_str(&format!(
-        r#"# --- Server List (MOTD & Ping) ------------------------------------------------
+        r#"# === Server List (MOTD & Ping) ================================================
 motd = {motd:?}
 # Rotating MOTDs (overrides motd when non-empty):
 motds = {motds}
@@ -809,7 +809,7 @@ ping_passthrough = {passthrough:?}
 sample_players_in_ping = {sample_players}  # Show online player names on hover
 announce_forge = {announce_forge}          # Advertise Forge FML support in ping
 
-# --- Timeouts, Compression & Anti-Bot Limits ----------------------------------
+# === Timeouts, Compression & Anti-Bot Limits ==================================
 handshake_timeout_ms = {handshake_timeout_ms}
 connect_timeout_ms = {connect_timeout_ms}
 read_timeout_ms = {read_timeout_ms}        # Idle read timeout in Play/Config (0 = disabled)
@@ -820,7 +820,7 @@ max_connections_per_ip = {max_connections_per_ip}
 rate_limit_per_sec = {rate_limit_per_sec}
 kick_existing_players = {kick_existing_players}
 
-# --- Access Control & Permissions ---------------------------------------------
+# === Access Control & Permissions =============================================
 whitelist_enabled = {whitelist_enabled}
 whitelist = {whitelist}
 banned_players = {banned_players}
@@ -828,7 +828,7 @@ banned_ips = {banned_ips}
 # Admins can run /send, /alert, /find, /kick, /radproxy and bypass whitelist/limits.
 admins = {admins}
 
-# --- Logging, Metrics & Plugins (Radons) --------------------------------------
+# === Logging, Metrics & Plugins (Radons) ======================================
 log_player_connections = {log_player_connections}
 log_command_executions = {log_command_executions}
 "#,
@@ -871,7 +871,7 @@ log_command_executions = {log_command_executions}
     ));
 
     out.push_str(&format!(
-        r#"# --- Seamless Restart (1.20.2+) -----------------------------------------------
+        r#"# === Seamless Restart (1.20.2+) ===============================================
 # Hold players in-world and reconnect automatically when a backend restarts.
 seamless_restart = {seamless_restart}
 seamless_restart_timeout_secs = {seamless_restart_timeout_secs}
@@ -879,13 +879,13 @@ seamless_restart_poll_ms = {seamless_restart_poll_ms}
 seamless_restart_freeze = {seamless_restart_freeze}
 seamless_restart_message = {seamless_restart_message:?}
 
-# --- GameSpy4 UDP Query -------------------------------------------------------
+# === GameSpy4 UDP Query =======================================================
 query_enabled = {query_enabled}
 query_port = {query_port}
 query_map = {query_map:?}
 query_show_plugins = {query_show_plugins}
 
-# --- Routing & Backend Servers ------------------------------------------------
+# === Routing & Backend Servers ================================================
 "#,
         seamless_restart = file.seamless_restart,
         seamless_restart_timeout_secs = file.seamless_restart_timeout_secs,
